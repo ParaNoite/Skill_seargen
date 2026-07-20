@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .models import RunState
+from .models import EvidenceTimeline, RunState, VideoSourceManifest
 
 
 def safe_slug(value: str) -> str:
@@ -22,6 +22,18 @@ class RunStore:
 
     def state_path(self, run_id: str) -> Path:
         return self.run_path(run_id) / "run_state.json"
+
+    def manifest_path(self, run_id: str) -> Path:
+        return self.run_path(run_id) / "manifest.json"
+
+    def evidence_timeline_path(self, run_id: str) -> Path:
+        return self.run_path(run_id) / "evidence_timeline.json"
+
+    def frame_index_path(self, run_id: str) -> Path:
+        return self.run_path(run_id) / "frame_index.json"
+
+    def failure_report_path(self, run_id: str) -> Path:
+        return self.run_path(run_id) / "failure_report.md"
 
     def start_or_resume(self, source: str, source_id: str) -> RunState:
         run_id = f"{source}-{safe_slug(source_id)}"
@@ -44,13 +56,31 @@ class RunStore:
             raise FileNotFoundError(f"找不到 run：{run_id}")
         return RunState.from_dict(read_json(path))
 
+    def save_manifest(self, run_id: str, manifest: VideoSourceManifest) -> Path:
+        path = self.manifest_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, manifest.to_dict())
+        return path
+
+    def save_evidence_timeline(self, run_id: str, timeline: EvidenceTimeline) -> Path:
+        path = self.evidence_timeline_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, timeline.to_dict())
+        return path
+
+    def save_failure_report(self, run_id: str, lines: list[str]) -> Path:
+        path = self.failure_report_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return path
+
 
 def read_json(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as file:
         return json.load(file)
 
 
-def write_json(path: str | Path, value: dict[str, Any]) -> None:
+def write_json(path: str | Path, value: Any) -> None:
     with Path(path).open("w", encoding="utf-8", newline="\n") as file:
         json.dump(value, file, ensure_ascii=False, indent=2)
         file.write("\n")

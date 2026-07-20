@@ -72,7 +72,72 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["source"], "bilibili")
+            self.assertEqual(payload["status"], "running")
             self.assertTrue((runs_dir / payload["run_id"] / "run_state.json").exists())
+            self.assertTrue((runs_dir / payload["run_id"] / "manifest.json").exists())
+
+    def test_inspect_displays_manifest_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config_path = temp_path / "config.json"
+            runs_dir = temp_path / "runs"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            video_stdout = io.StringIO()
+
+            main(
+                [
+                    "video",
+                    "https://www.bilibili.com/video/BV1xx411c7mD/",
+                    "--config",
+                    str(config_path),
+                    "--runs",
+                    str(runs_dir),
+                ],
+                stdout=video_stdout,
+            )
+            run_id = json.loads(video_stdout.getvalue())["run_id"]
+            inspect_stdout = io.StringIO()
+
+            exit_code = main(
+                ["inspect", run_id, "--runs", str(runs_dir)],
+                stdout=inspect_stdout,
+            )
+
+            self.assertEqual(exit_code, 0)
+            output = inspect_stdout.getvalue()
+            self.assertIn("manifest: bilibili BV1xx411c7mD", output)
+            self.assertIn("metadata_pending", output)
+
+    def test_video_resume_does_not_overwrite_existing_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config_path = temp_path / "config.json"
+            runs_dir = temp_path / "runs"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            first_stdout = io.StringIO()
+
+            main(
+                ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
+                stdout=first_stdout,
+            )
+            run_id = json.loads(first_stdout.getvalue())["run_id"]
+            manifest_path = runs_dir / run_id / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["title"] = "already fetched"
+            manifest["risk_flags"] = []
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            second_stdout = io.StringIO()
+            exit_code = main(
+                ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
+                stdout=second_stdout,
+            )
+
+            self.assertEqual(exit_code, 0)
+            restored = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(restored["title"], "already fetched")
+            self.assertEqual(restored["risk_flags"], [])
 
 
 if __name__ == "__main__":

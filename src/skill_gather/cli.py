@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .config import ConfigError, load_config
+from .models import SkillPackageMetadata, VideoSourceManifest
 from .runs import RunStore, read_json
 from .source import SourceInferenceError, infer_source
 
@@ -44,6 +45,25 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
     store = RunStore(args.runs)
     state = store.start_or_resume(source.source, source.source_id)
+    manifest_path = store.manifest_path(state.run_id)
+    if not manifest_path.exists():
+        manifest = VideoSourceManifest(
+            source=source.source,
+            source_id=source.source_id,
+            url=args.url,
+            title="",
+            author="",
+            duration_sec=0,
+            subtitle_available=False,
+            media_access="public",
+            risk_flags=["metadata_pending"],
+        )
+        manifest_path = store.save_manifest(state.run_id, manifest)
+    if state.status == "created":
+        state.status = "running"
+    state.artifacts["manifest"] = str(manifest_path)
+    store.save(state)
+
     payload = {
         "run_id": state.run_id,
         "source": source.source,
@@ -51,7 +71,7 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         "status": state.status,
         "current_stage": state.current_stage,
         "out": args.out,
-        "message": "项目已初始化到可恢复 run；真实视频处理阶段尚未实现。",
+        "message": "项目已初始化到可恢复 run；已写入基础 manifest。",
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
     return 0
@@ -68,17 +88,16 @@ def handle_score(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         return 1
 
     try:
-        metadata = read_json(metadata_path)
+        metadata = SkillPackageMetadata.from_dict(read_json(metadata_path))
     except json.JSONDecodeError as exc:
         print(f"metadata.json 不是合法 JSON：{exc}", file=stderr)
         return 2
 
-    scores = metadata.get("scores", {})
     payload = {
         "skill_dir": str(args.skill_dir),
-        "package_status": metadata.get("package_status"),
-        "scores": scores,
-        "risk_flags": metadata.get("risk_flags", []),
+        "package_status": metadata.package_status,
+        "scores": metadata.scores.to_dict(),
+        "risk_flags": metadata.risk_flags,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
     return 0
@@ -98,7 +117,24 @@ def handle_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> 
     print(f"已完成阶段: {', '.join(state.completed_stages) or '无'}", file=stdout)
     if state.failure_reason:
         print(f"失败原因: {state.failure_reason}", file=stdout)
-    print("证据摘要: 尚未生成 EvidenceTimeline", file=stdout)
+
+    manifest_path = store.manifest_path(state.run_id)
+    if manifest_path.exists():
+        manifest = VideoSourceManifest.from_dict(read_json(manifest_path))
+        print(
+            f"manifest: {manifest.source} {manifest.source_id} {manifest.url}",
+            file=stdout,
+        )
+        if manifest.risk_flags:
+            print(f"manifest 风险: {', '.join(manifest.risk_flags)}", file=stdout)
+    else:
+        print("manifest: 尚未生成", file=stdout)
+
+    if store.evidence_timeline_path(state.run_id).exists():
+        print("证据摘要: 已生成 EvidenceTimeline", file=stdout)
+    else:
+        print("证据摘要: 尚未生成 EvidenceTimeline", file=stdout)
+
     print("评分: 尚未生成", file=stdout)
     return 0
 
