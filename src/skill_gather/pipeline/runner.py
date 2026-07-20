@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Protocol
 
+from ..adapters.bilibili import manifest_from_yt_dlp_metadata
 from ..config import AppConfig
+from ..integrations import YtDlpClient, YtDlpError
 from ..models import (
     EvidenceTimeline,
     PIPELINE_STAGES,
@@ -16,6 +19,12 @@ from ..models import (
 from ..packaging import write_audit_package
 from ..runs import RunStore, read_json, write_json
 from ..scoring import conservative_score
+from ..source import SourceInfo
+
+
+class MetadataProbe(Protocol):
+    def probe_metadata(self, url: str) -> dict[str, Any]:
+        ...
 
 
 def run_video_pipeline(
@@ -25,6 +34,7 @@ def run_video_pipeline(
     state: RunState,
     manifest: VideoSourceManifest,
     out_dir: str | Path,
+    metadata_probe: MetadataProbe | None = None,
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
@@ -33,7 +43,13 @@ def run_video_pipeline(
     state.failure_reason = None
     store.save(state)
 
-    _run_regular_stage(store, state, "manifest", lambda: _ensure_manifest(store, state, manifest))
+    probe = metadata_probe or YtDlpClient()
+    _run_regular_stage(
+        store,
+        state,
+        "manifest",
+        lambda: _probe_manifest(store, state, manifest, probe),
+    )
     _run_regular_stage(store, state, "media_extract", lambda: _write_media_extract(store, state))
     _run_regular_stage(store, state, "frame_extract", lambda: _write_frame_index(store, state))
     _run_regular_stage(store, state, "asr", lambda: _write_asr_result(store, state))
@@ -71,28 +87,79 @@ def _mark_completed(store: RunStore, state: RunState, stage: str) -> None:
     store.save(state)
 
 
-def _ensure_manifest(
+def _probe_manifest(
     store: RunStore,
     state: RunState,
     manifest: VideoSourceManifest,
+    metadata_probe: MetadataProbe,
 ) -> None:
     path = store.manifest_path(state.run_id)
-    if not path.exists():
+    if path.exists():
+        manifest = VideoSourceManifest.from_dict(read_json(path))
+        if "metadata_pending" not in manifest.risk_flags:
+            state.artifacts["manifest"] = str(path)
+            return
+
+    try:
+        metadata = metadata_probe.probe_metadata(manifest.url)
+    except YtDlpError as exc:
+        manifest.risk_flags = _without_flag(manifest.risk_flags, "metadata_pending")
+        manifest.risk_flags.append("metadata_probe_failed")
         store.save_manifest(state.run_id, manifest)
+        _write_media_probe(
+            store,
+            state,
+            "failed",
+            exc.code,
+            returncode=exc.returncode,
+            summary=exc.safe_summary,
+        )
+    else:
+        source = SourceInfo(source=manifest.source, source_id=manifest.source_id)
+        updated = manifest_from_yt_dlp_metadata(manifest.url, source, metadata)
+        store.save_manifest(state.run_id, updated)
+        _write_media_probe(store, state, "metadata_available", "")
     state.artifacts["manifest"] = str(path)
+
+
+def _without_flag(flags: list[str], flag: str) -> list[str]:
+    return [value for value in flags if value != flag]
+
+
+def _write_media_probe(
+    store: RunStore,
+    state: RunState,
+    status: str,
+    reason_code: str,
+    *,
+    returncode: int | None = None,
+    summary: str = "",
+) -> Path:
+    path = store.run_path(state.run_id) / "media_probe.json"
+    payload = {"status": status}
+    if reason_code:
+        payload["reason_code"] = reason_code
+    if returncode is not None:
+        payload["returncode"] = returncode
+    if summary:
+        payload["summary"] = summary
+    write_json(path, payload)
+    state.artifacts["media_probe"] = str(path)
+    return path
 
 
 def _write_media_extract(store: RunStore, state: RunState) -> None:
     path = store.run_path(state.run_id) / "media_extract.json"
     if not path.exists():
-        write_json(
-            path,
-            {
-                "status": "skipped",
-                "reason": "external media extraction is not implemented yet",
-                "requires": ["yt-dlp"],
-            },
-        )
+        manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        probe_path = store.run_path(state.run_id) / "media_probe.json"
+        if "metadata_probe_failed" in manifest.risk_flags:
+            reason = "metadata probe failed; media extraction was not attempted"
+        elif probe_path.exists():
+            reason = "metadata available; full media download is not implemented yet"
+        else:
+            reason = "external media extraction is not implemented yet"
+        write_json(path, {"status": "skipped", "reason": reason, "requires": ["yt-dlp"]})
     state.artifacts["media_extract"] = str(path)
 
 
@@ -178,6 +245,7 @@ def _run_package_stage(
         return
 
     state.current_stage = "package"
+    manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
     score = ScoreResult.from_dict(read_json(store.run_path(state.run_id) / "score.json"))
     timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
     metadata = SkillPackageMetadata(
@@ -200,7 +268,18 @@ def _run_package_stage(
     )
 
     state.status = "failed"
-    state.failure_reason = "insufficient evidence: media, ASR, and vision stages are not implemented yet"
+    media_probe_path = store.run_path(state.run_id) / "media_probe.json"
+    if media_probe_path.exists():
+        media_probe = read_json(media_probe_path)
+    else:
+        media_probe = {}
+    if media_probe.get("status") == "failed":
+        reason_code = media_probe.get("reason_code", "metadata_probe_failed")
+        state.failure_reason = f"metadata probe failed: {reason_code}"
+    else:
+        state.failure_reason = (
+            "insufficient evidence: media, ASR, and vision stages are not implemented yet"
+        )
     state.artifacts["candidate_out_dir"] = str(Path(out_dir))
     _mark_completed(store, state, "package")
     package_path = write_audit_package(

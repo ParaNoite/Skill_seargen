@@ -3,7 +3,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from skill_gather.integrations import YtDlpError
 from skill_gather.cli import main
 
 
@@ -49,6 +51,23 @@ class CliTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["scores"]["final_status"], "needs_review")
 
+    def metadata_probe_success(self):
+        return patch(
+            "skill_gather.integrations.yt_dlp.YtDlpClient.probe_metadata",
+            return_value={
+                "title": "Skill Demo",
+                "uploader": "Teacher",
+                "duration": 120,
+                "subtitles": {"zh-CN": [{"url": "https://example.test/subtitle.json"}]},
+            },
+        )
+
+    def metadata_probe_failure(self):
+        return patch(
+            "skill_gather.integrations.yt_dlp.YtDlpClient.probe_metadata",
+            side_effect=YtDlpError("yt-dlp unavailable"),
+        )
+
     def test_video_runs_minimal_failure_audit_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -57,17 +76,18 @@ class CliTests(unittest.TestCase):
             config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             stdout = io.StringIO()
 
-            exit_code = main(
-                [
-                    "video",
-                    "https://www.bilibili.com/video/BV1xx411c7mD/",
-                    "--config",
-                    str(config_path),
-                    "--runs",
-                    str(runs_dir),
-                ],
-                stdout=stdout,
-            )
+            with self.metadata_probe_success():
+                exit_code = main(
+                    [
+                        "video",
+                        "https://www.bilibili.com/video/BV1xx411c7mD/",
+                        "--config",
+                        str(config_path),
+                        "--runs",
+                        str(runs_dir),
+                    ],
+                    stdout=stdout,
+                )
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
@@ -86,17 +106,18 @@ class CliTests(unittest.TestCase):
             config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             video_stdout = io.StringIO()
 
-            main(
-                [
-                    "video",
-                    "https://www.bilibili.com/video/BV1xx411c7mD/",
-                    "--config",
-                    str(config_path),
-                    "--runs",
-                    str(runs_dir),
-                ],
-                stdout=video_stdout,
-            )
+            with self.metadata_probe_failure():
+                main(
+                    [
+                        "video",
+                        "https://www.bilibili.com/video/BV1xx411c7mD/",
+                        "--config",
+                        str(config_path),
+                        "--runs",
+                        str(runs_dir),
+                    ],
+                    stdout=video_stdout,
+                )
             run_id = json.loads(video_stdout.getvalue())["run_id"]
             inspect_stdout = io.StringIO()
 
@@ -108,7 +129,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             output = inspect_stdout.getvalue()
             self.assertIn("manifest: bilibili BV1xx411c7mD", output)
-            self.assertIn("metadata_pending", output)
+            self.assertIn("metadata_probe_failed", output)
             self.assertIn("评分: 0 (failed)", output)
 
     def test_video_resume_does_not_overwrite_existing_manifest(self):
@@ -120,10 +141,11 @@ class CliTests(unittest.TestCase):
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"
             first_stdout = io.StringIO()
 
-            main(
-                ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
-                stdout=first_stdout,
-            )
+            with self.metadata_probe_failure():
+                main(
+                    ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
+                    stdout=first_stdout,
+                )
             run_id = json.loads(first_stdout.getvalue())["run_id"]
             manifest_path = runs_dir / run_id / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -132,10 +154,11 @@ class CliTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
             second_stdout = io.StringIO()
-            exit_code = main(
-                ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
-                stdout=second_stdout,
-            )
+            with self.metadata_probe_success():
+                exit_code = main(
+                    ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
+                    stdout=second_stdout,
+                )
 
             self.assertEqual(exit_code, 0)
             restored = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -150,17 +173,18 @@ class CliTests(unittest.TestCase):
             config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             video_stdout = io.StringIO()
 
-            main(
-                [
-                    "video",
-                    "https://www.bilibili.com/video/BV1xx411c7mD/",
-                    "--config",
-                    str(config_path),
-                    "--runs",
-                    str(runs_dir),
-                ],
-                stdout=video_stdout,
-            )
+            with self.metadata_probe_success():
+                main(
+                    [
+                        "video",
+                        "https://www.bilibili.com/video/BV1xx411c7mD/",
+                        "--config",
+                        str(config_path),
+                        "--runs",
+                        str(runs_dir),
+                    ],
+                    stdout=video_stdout,
+                )
             run_id = json.loads(video_stdout.getvalue())["run_id"]
             score_stdout = io.StringIO()
 
