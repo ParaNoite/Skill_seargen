@@ -27,6 +27,11 @@ class MetadataProbe(Protocol):
         ...
 
 
+class MediaDownloader(Protocol):
+    def download_media(self, url: str, target_dir: str | Path) -> dict[str, Any]:
+        ...
+
+
 def run_video_pipeline(
     *,
     config: AppConfig,
@@ -35,6 +40,7 @@ def run_video_pipeline(
     manifest: VideoSourceManifest,
     out_dir: str | Path,
     metadata_probe: MetadataProbe | None = None,
+    media_downloader: MediaDownloader | None = None,
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
@@ -44,13 +50,19 @@ def run_video_pipeline(
     store.save(state)
 
     probe = metadata_probe or YtDlpClient()
+    downloader = media_downloader or YtDlpClient()
     _run_regular_stage(
         store,
         state,
         "manifest",
         lambda: _probe_manifest(store, state, manifest, probe),
     )
-    _run_regular_stage(store, state, "media_extract", lambda: _write_media_extract(store, state))
+    _run_regular_stage(
+        store,
+        state,
+        "media_extract",
+        lambda: _write_media_extract(store, state, downloader),
+    )
     _run_regular_stage(store, state, "frame_extract", lambda: _write_frame_index(store, state))
     _run_regular_stage(store, state, "asr", lambda: _write_asr_result(store, state))
     _run_regular_stage(store, state, "vision_ocr", lambda: _write_vision_result(store, state))
@@ -97,6 +109,7 @@ def _probe_manifest(
     if path.exists():
         manifest = VideoSourceManifest.from_dict(read_json(path))
         if "metadata_pending" not in manifest.risk_flags:
+            _write_media_probe(store, state, "metadata_available", "")
             state.artifacts["manifest"] = str(path)
             return
 
@@ -148,19 +161,55 @@ def _write_media_probe(
     return path
 
 
-def _write_media_extract(store: RunStore, state: RunState) -> None:
+def _write_media_extract(
+    store: RunStore,
+    state: RunState,
+    media_downloader: MediaDownloader,
+) -> None:
     path = store.run_path(state.run_id) / "media_extract.json"
-    if not path.exists():
+    existing = read_json(path) if path.exists() else {}
+    if existing.get("status") not in {"downloaded", "failed"}:
         manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
         probe_path = store.run_path(state.run_id) / "media_probe.json"
         if "metadata_probe_failed" in manifest.risk_flags:
             reason = "metadata probe failed; media extraction was not attempted"
-        elif probe_path.exists():
-            reason = "metadata available; full media download is not implemented yet"
+            write_json(path, {"status": "skipped", "reason": reason, "requires": ["yt-dlp"]})
+        elif probe_path.exists() and read_json(probe_path).get("status") == "metadata_available":
+            media_dir = store.run_path(state.run_id) / "media"
+            try:
+                result = media_downloader.download_media(manifest.url, media_dir)
+            except YtDlpError as exc:
+                manifest.risk_flags.append("media_download_failed")
+                store.save_manifest(state.run_id, manifest)
+                write_json(
+                    path,
+                    {
+                        "status": "failed",
+                        "reason_code": exc.code,
+                        "returncode": exc.returncode,
+                        "summary": exc.safe_summary,
+                        "target_dir": str(media_dir),
+                    },
+                )
+            else:
+                write_json(path, media_download_record(result))
         else:
             reason = "external media extraction is not implemented yet"
-        write_json(path, {"status": "skipped", "reason": reason, "requires": ["yt-dlp"]})
+            write_json(path, {"status": "skipped", "reason": reason, "requires": ["yt-dlp"]})
     state.artifacts["media_extract"] = str(path)
+
+
+def media_download_record(result: dict[str, Any]) -> dict[str, Any]:
+    media_files = result.get("media_files", [])
+    if not isinstance(media_files, list):
+        media_files = []
+    return {
+        "status": "downloaded",
+        "target_dir": str(result.get("target_dir", "")),
+        "output_template": str(result.get("output_template", "")),
+        "media_files": [str(path) for path in media_files],
+        "returncode": result.get("returncode", 0),
+    }
 
 
 def _write_frame_index(store: RunStore, state: RunState) -> None:
@@ -273,9 +322,17 @@ def _run_package_stage(
         media_probe = read_json(media_probe_path)
     else:
         media_probe = {}
+    media_extract_path = store.run_path(state.run_id) / "media_extract.json"
+    if media_extract_path.exists():
+        media_extract = read_json(media_extract_path)
+    else:
+        media_extract = {}
     if media_probe.get("status") == "failed":
         reason_code = media_probe.get("reason_code", "metadata_probe_failed")
         state.failure_reason = f"metadata probe failed: {reason_code}"
+    elif media_extract.get("status") == "failed":
+        reason_code = media_extract.get("reason_code", "media_download_failed")
+        state.failure_reason = f"media extraction failed: {reason_code}"
     else:
         state.failure_reason = (
             "insufficient evidence: media, ASR, and vision stages are not implemented yet"

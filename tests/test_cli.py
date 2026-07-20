@@ -68,6 +68,17 @@ class CliTests(unittest.TestCase):
             side_effect=YtDlpError("yt-dlp unavailable"),
         )
 
+    def media_download_success(self):
+        return patch(
+            "skill_gather.integrations.yt_dlp.YtDlpClient.download_media",
+            return_value={
+                "status": "downloaded",
+                "target_dir": "runs/demo/media",
+                "output_template": "%(id)s.%(ext)s",
+                "returncode": 0,
+            },
+        )
+
     def test_video_runs_minimal_failure_audit_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -76,7 +87,7 @@ class CliTests(unittest.TestCase):
             config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             stdout = io.StringIO()
 
-            with self.metadata_probe_success():
+            with self.metadata_probe_success(), self.media_download_success():
                 exit_code = main(
                     [
                         "video",
@@ -106,7 +117,7 @@ class CliTests(unittest.TestCase):
             config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             video_stdout = io.StringIO()
 
-            with self.metadata_probe_failure():
+            with self.metadata_probe_failure(), self.media_download_success():
                 main(
                     [
                         "video",
@@ -141,7 +152,7 @@ class CliTests(unittest.TestCase):
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"
             first_stdout = io.StringIO()
 
-            with self.metadata_probe_failure():
+            with self.metadata_probe_failure(), self.media_download_success():
                 main(
                     ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
                     stdout=first_stdout,
@@ -154,7 +165,7 @@ class CliTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
             second_stdout = io.StringIO()
-            with self.metadata_probe_success():
+            with self.metadata_probe_success(), self.media_download_success():
                 exit_code = main(
                     ["video", url, "--config", str(config_path), "--runs", str(runs_dir)],
                     stdout=second_stdout,
@@ -173,7 +184,7 @@ class CliTests(unittest.TestCase):
             config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
             video_stdout = io.StringIO()
 
-            with self.metadata_probe_success():
+            with self.metadata_probe_success(), self.media_download_success():
                 main(
                     [
                         "video",
