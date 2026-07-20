@@ -49,7 +49,7 @@ class CliTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["scores"]["final_status"], "needs_review")
 
-    def test_video_creates_resumable_run_shell(self):
+    def test_video_runs_minimal_failure_audit_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             config_path = temp_path / "config.json"
@@ -72,9 +72,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["source"], "bilibili")
-            self.assertEqual(payload["status"], "running")
+            self.assertEqual(payload["status"], "failed")
             self.assertTrue((runs_dir / payload["run_id"] / "run_state.json").exists())
             self.assertTrue((runs_dir / payload["run_id"] / "manifest.json").exists())
+            self.assertTrue((runs_dir / payload["run_id"] / "metadata.json").exists())
+            self.assertTrue((runs_dir / payload["run_id"] / "failure_report.md").exists())
 
     def test_inspect_displays_manifest_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -107,6 +109,7 @@ class CliTests(unittest.TestCase):
             output = inspect_stdout.getvalue()
             self.assertIn("manifest: bilibili BV1xx411c7mD", output)
             self.assertIn("metadata_pending", output)
+            self.assertIn("评分: 0 (failed)", output)
 
     def test_video_resume_does_not_overwrite_existing_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -138,6 +141,35 @@ class CliTests(unittest.TestCase):
             restored = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(restored["title"], "already fetched")
             self.assertEqual(restored["risk_flags"], [])
+
+    def test_score_reads_video_audit_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config_path = temp_path / "config.json"
+            runs_dir = temp_path / "runs"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            video_stdout = io.StringIO()
+
+            main(
+                [
+                    "video",
+                    "https://www.bilibili.com/video/BV1xx411c7mD/",
+                    "--config",
+                    str(config_path),
+                    "--runs",
+                    str(runs_dir),
+                ],
+                stdout=video_stdout,
+            )
+            run_id = json.loads(video_stdout.getvalue())["run_id"]
+            score_stdout = io.StringIO()
+
+            exit_code = main(["score", str(runs_dir / run_id)], stdout=score_stdout)
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(score_stdout.getvalue())
+            self.assertEqual(payload["package_status"], "failed")
+            self.assertEqual(payload["scores"]["final_status"], "failed")
 
 
 if __name__ == "__main__":

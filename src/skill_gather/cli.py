@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+from .adapters.bilibili import build_initial_manifest
 from .config import ConfigError, load_config
 from .models import SkillPackageMetadata, VideoSourceManifest
+from .pipeline import run_video_pipeline
 from .runs import RunStore, read_json
 from .source import SourceInferenceError, infer_source
 
@@ -37,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     try:
-        load_config(args.config)
+        config = load_config(args.config)
         source = infer_source(args.url)
     except (ConfigError, FileNotFoundError, json.JSONDecodeError, SourceInferenceError) as exc:
         print(str(exc), file=stderr)
@@ -47,22 +49,18 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     state = store.start_or_resume(source.source, source.source_id)
     manifest_path = store.manifest_path(state.run_id)
     if not manifest_path.exists():
-        manifest = VideoSourceManifest(
-            source=source.source,
-            source_id=source.source_id,
-            url=args.url,
-            title="",
-            author="",
-            duration_sec=0,
-            subtitle_available=False,
-            media_access="public",
-            risk_flags=["metadata_pending"],
-        )
+        manifest = build_initial_manifest(args.url, source)
         manifest_path = store.save_manifest(state.run_id, manifest)
-    if state.status == "created":
-        state.status = "running"
-    state.artifacts["manifest"] = str(manifest_path)
-    store.save(state)
+    else:
+        manifest = VideoSourceManifest.from_dict(read_json(manifest_path))
+
+    state = run_video_pipeline(
+        config=config,
+        store=store,
+        state=state,
+        manifest=manifest,
+        out_dir=args.out,
+    )
 
     payload = {
         "run_id": state.run_id,
@@ -71,7 +69,7 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         "status": state.status,
         "current_stage": state.current_stage,
         "out": args.out,
-        "message": "项目已初始化到可恢复 run；已写入基础 manifest。",
+        "message": "已跑完最小管线；当前因证据不足生成失败审计包。",
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
     return 0
@@ -135,7 +133,15 @@ def handle_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> 
     else:
         print("证据摘要: 尚未生成 EvidenceTimeline", file=stdout)
 
-    print("评分: 尚未生成", file=stdout)
+    metadata_path = store.run_path(state.run_id) / "metadata.json"
+    if metadata_path.exists():
+        metadata = SkillPackageMetadata.from_dict(read_json(metadata_path))
+        print(
+            f"评分: {metadata.scores.final_score} ({metadata.scores.final_status})",
+            file=stdout,
+        )
+    else:
+        print("评分: 尚未生成", file=stdout)
     return 0
 
 
