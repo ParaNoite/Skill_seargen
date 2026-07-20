@@ -1,0 +1,17 @@
+{
+  "providers": {
+    "newapi": {
+      "base_url": "https://api.renice.cc/v1",
+      "api_key_env": "NEWAPI_API_KEY",
+      "vision_model": "fill-me",
+      "asr_model": "fill-me",
+      "distiller_model": "fill-me",
+      "judge_model": "fill-me"
+    }
+  },
+  "defaults": {
+    "provider": "newapi",
+    "output_dir": "./skills",
+    "run_dir": "./runs"
+  }
+}

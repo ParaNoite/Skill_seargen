@@ -16,6 +16,12 @@ venv/
 config.json
 runs/
 skills/
+
+# Local third-party source trees. Keep only documented instructions.
+third_party/*
+!third_party/README.md
+
+# Local generated media and evidence artifacts
 *.mp4
 *.mkv
 *.webm
