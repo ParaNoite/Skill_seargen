@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# Local secrets and runtime artifacts
+.env
+config.json
+runs/
+skills/
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.png
+*.jpg
+*.jpeg
