@@ -25,5 +25,11 @@
 
 - ASR：`POST {base_url}/audio/transcriptions`，multipart form-data，字段 `model` 和文件字段 `file`。
 - 视觉/OCR：`POST {base_url}/chat/completions`，JSON body，使用 `messages[].content` 的 text + `image_url` 多模态格式，图片以 `data:{mime};base64,...` 传入，并请求 `response_format: {"type": "json_object"}`。
+- RIA++ 草案蒸馏：`POST {base_url}/chat/completions`，JSON body，将 `VideoSourceManifest` 和 `EvidenceTimeline` 作为文本证据传入，并请求 `response_format: {"type": "json_object"}`。
+- LLM judge：`POST {base_url}/chat/completions`，JSON body，将 `VideoSourceManifest`、`EvidenceTimeline` 和 `distillation.json` 草案作为文本证据传入，并请求 `response_format: {"type": "json_object"}`。
 
 视觉/OCR 响应要求 `choices[0].message.content` 是 JSON 字符串，解析后必须包含 `observations` 数组；每个 observation 至少包含非空 `type` 和 `claim`，可选 `raw_excerpt` 与 `confidence`。HTTP、连接和响应形状错误会转换为脱敏后的 `NewApiError`，供管线逐帧记录到审计产物。
+
+RIA++ 草案蒸馏响应要求 `choices[0].message.content` 是 JSON 字符串，解析后必须包含非空 `candidate_title` 和 `ria` 对象；`ria` 至少包含 `recall`、`interpret`、`apply`、`boundary`、`test`。HTTP、连接和响应形状错误同样会转换为脱敏后的 `NewApiError`，供管线写入 `distillation.json`。
+
+LLM judge 响应要求 `choices[0].message.content` 是 JSON 字符串，解析后必须包含 0-100 的整数 `score`，可选 `rationale` 和 `risk_flags`。HTTP、连接和响应形状错误同样会转换为脱敏后的 `NewApiError`，供管线写入 `score.json` 的 `judge` 字段。

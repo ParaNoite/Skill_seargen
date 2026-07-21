@@ -285,6 +285,168 @@ class NewApiClientTests(unittest.TestCase):
         self.assertEqual(context.exception.code, "vision_unreachable")
         self.assertIn("temporary dns failure", context.exception.safe_summary)
 
+    def test_distill_skill_posts_evidence_and_returns_ria_draft(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "candidate_title": "Install editable Python package",
+                                        "summary": "A reusable workflow for local package setup.",
+                                        "ria": {
+                                            "recall": "00:00:10 shows the command.",
+                                            "interpret": "Use editable installs during local development.",
+                                            "apply": ["Run python -m pip install -e ."],
+                                            "boundary": "Only for Python packages with packaging metadata.",
+                                            "test": ["Import the package after install."],
+                                        },
+                                        "evidence_refs": [
+                                            {
+                                                "timestamp": "00:00:10",
+                                                "type": "frame_ocr",
+                                                "claim": "The frame shows a pip install command.",
+                                            }
+                                        ],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ),
+        ) as urlopen:
+            result = NewApiClient(
+                base_url="https://api.example.test/v1/",
+                api_key="secret-key",
+            ).distill_skill(
+                {
+                    "items": [
+                        {
+                            "timestamp": "00:00:10",
+                            "type": "frame_ocr",
+                            "claim": "The frame shows a pip install command.",
+                            "raw_excerpt": "python -m pip install -e .",
+                            "confidence": 0.93,
+                        }
+                    ]
+                },
+                {"title": "Skill Demo", "author": "Teacher"},
+                "distiller-model",
+            )
+
+        self.assertEqual(result["status"], "distilled")
+        self.assertEqual(result["candidate_title"], "Install editable Python package")
+        self.assertEqual(result["ria"]["apply"], ["Run python -m pip install -e ."])
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.example.test/v1/chat/completions")
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "distiller-model")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        prompt_text = payload["messages"][0]["content"]
+        self.assertIn("Skill Demo", prompt_text)
+        self.assertIn("00:00:10", prompt_text)
+
+    def test_judge_skill_posts_draft_and_returns_score(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "score": 86,
+                                        "rationale": "The draft is actionable and evidence backed.",
+                                        "risk_flags": ["single_channel_evidence"],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ),
+        ) as urlopen:
+            result = NewApiClient(
+                base_url="https://api.example.test/v1/",
+                api_key="secret-key",
+            ).judge_skill(
+                {
+                    "candidate_title": "Install editable Python package",
+                    "ria": {
+                        "recall": "00:00:10 shows the command.",
+                        "interpret": "Use editable installs during local development.",
+                        "apply": ["Run python -m pip install -e ."],
+                        "boundary": "Only for Python packages with packaging metadata.",
+                        "test": ["Import the package after install."],
+                    },
+                },
+                {
+                    "items": [
+                        {
+                            "timestamp": "00:00:10",
+                            "type": "frame_ocr",
+                            "claim": "The frame shows a pip install command.",
+                        }
+                    ]
+                },
+                {"title": "Skill Demo"},
+                "judge-model",
+            )
+
+        self.assertEqual(result["status"], "judged")
+        self.assertEqual(result["score"], 86)
+        self.assertEqual(result["risk_flags"], ["single_channel_evidence"])
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.example.test/v1/chat/completions")
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "judge-model")
+        prompt_text = payload["messages"][0]["content"]
+        self.assertIn("Install editable Python package", prompt_text)
+        self.assertIn("Skill Demo", prompt_text)
+
+    def test_distill_skill_reports_invalid_ria_shape(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "candidate_title": "Install editable Python package",
+                                        "ria": {
+                                            "recall": "00:00:10 shows the command.",
+                                            "interpret": "Use editable installs during local development.",
+                                            "apply": "",
+                                            "boundary": "Only for Python packages with packaging metadata.",
+                                            "test": [],
+                                        },
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ),
+        ):
+            with self.assertRaises(NewApiError) as context:
+                NewApiClient(
+                    base_url="https://api.example.test/v1/",
+                    api_key="secret-key",
+                ).distill_skill(
+                    {"items": [{"timestamp": "00:00:10", "type": "asr", "claim": "Use editable installs."}]},
+                    {"title": "Skill Demo"},
+                    "distiller-model",
+                )
+
+        self.assertEqual(context.exception.code, "invalid_distillation_shape")
+
 
 if __name__ == "__main__":
     unittest.main()

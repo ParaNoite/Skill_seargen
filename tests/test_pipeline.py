@@ -149,6 +149,59 @@ class FakeVisionClient:
         }
 
 
+class FakeDistillerClient:
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.calls = 0
+
+    def distill_skill(self, evidence_timeline, manifest, model):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return {
+            "status": "distilled",
+            "model": model,
+            "candidate_title": "Install editable Python package",
+            "summary": "A reusable workflow for local package setup.",
+            "ria": {
+                "recall": "00:00:10 shows the command.",
+                "interpret": "Use editable installs during local development.",
+                "apply": ["Run python -m pip install -e ."],
+                "boundary": "Only for Python packages with packaging metadata.",
+                "test": ["Import the package after install."],
+            },
+            "evidence_refs": [
+                {
+                    "timestamp": "00:00:10",
+                    "type": "frame_ocr",
+                    "claim": "The frame shows a pip install command.",
+                }
+            ],
+            "returncode": 0,
+        }
+
+
+class FakeJudgeClient:
+    def __init__(self, score: int = 86, error: Exception | None = None, risk_flags=None):
+        self.score = score
+        self.error = error
+        self.risk_flags = risk_flags or []
+        self.calls = 0
+
+    def judge_skill(self, distillation, evidence_timeline, manifest, model):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return {
+            "status": "judged",
+            "model": model,
+            "score": self.score,
+            "rationale": "The draft is actionable and evidence backed.",
+            "risk_flags": list(self.risk_flags),
+            "returncode": 0,
+        }
+
+
 class PipelineTests(unittest.TestCase):
     def test_run_video_pipeline_writes_successful_vision_ocr_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -323,7 +376,235 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(timeline["items"][1]["type"], "asr")
             self.assertEqual(timeline["items"][2]["raw_excerpt"], "python -m pip install -e .")
             distillation = read_json(store.run_path(result.run_id) / "distillation.json")
-            self.assertEqual(distillation["reason"], "RIA++ distillation is not implemented yet")
+            self.assertEqual(distillation["reason"], "newapi API key is not configured")
+
+    def test_run_video_pipeline_writes_successful_distillation_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+            )
+
+            distillation = read_json(store.run_path(result.run_id) / "distillation.json")
+            self.assertEqual(distillation["status"], "distilled")
+            self.assertEqual(distillation["model"], "distiller")
+            self.assertEqual(distillation["candidate_title"], "Install editable Python package")
+            self.assertEqual(distillation["ria"]["apply"], ["Run python -m pip install -e ."])
+            self.assertEqual(distillation["evidence_refs"][0]["timestamp"], "00:00:10")
+            self.assertEqual(
+                result.failure_reason,
+                "insufficient evidence: newapi API key is not configured",
+            )
+
+    def test_run_video_pipeline_writes_llm_judge_score(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+                judge_client=FakeJudgeClient(),
+            )
+
+            score = read_json(store.run_path(result.run_id) / "score.json")
+            self.assertEqual(score["rule_score"], 90)
+            self.assertEqual(score["llm_judge_score"], 86)
+            self.assertEqual(score["final_score"], 86)
+            self.assertEqual(score["final_status"], "passed")
+            self.assertEqual(result.status, "completed")
+            self.assertIsNone(result.failure_reason)
+
+    def test_run_video_pipeline_writes_successful_candidate_package_after_judge(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+                judge_client=FakeJudgeClient(score=86),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            score = read_json(run_dir / "score.json")
+            metadata = read_json(run_dir / "metadata.json")
+            package_path = Path(result.artifacts["package"])
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(score["llm_judge_score"], 86)
+            self.assertEqual(score["final_status"], "passed")
+            self.assertEqual(metadata["package_status"], "passed")
+            self.assertTrue((package_path / "SKILL.md").exists())
+            self.assertTrue((package_path / "README.md").exists())
+            self.assertTrue((package_path / "metadata.json").exists())
+            self.assertEqual(read_json(package_path / "metadata.json")["package_status"], "passed")
+
+    def test_run_video_pipeline_records_judge_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+                judge_client=FakeJudgeClient(
+                    error=NewApiError(
+                        "judge failed https://example.test/tmp token=x",
+                        code="judge_failed",
+                        status_code=502,
+                    )
+                ),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            score = read_json(run_dir / "score.json")
+            saved_manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(score["judge"]["status"], "failed")
+            self.assertEqual(score["judge"]["reason_code"], "judge_failed")
+            self.assertEqual(score["judge"]["returncode"], 502)
+            self.assertIn("[redacted-url]", score["judge"]["summary"])
+            self.assertNotIn("token=x", score["judge"]["summary"])
+            self.assertIn("judge_failed", saved_manifest["risk_flags"])
+
+    def test_run_video_pipeline_records_distillation_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(
+                    NewApiError(
+                        "distillation failed https://example.test/tmp token=x",
+                        code="distillation_failed",
+                        status_code=500,
+                    )
+                ),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            distillation = read_json(run_dir / "distillation.json")
+            saved_manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(distillation["status"], "failed")
+            self.assertEqual(distillation["reason_code"], "distillation_failed")
+            self.assertEqual(distillation["returncode"], 500)
+            self.assertIn("[redacted-url]", distillation["summary"])
+            self.assertNotIn("token=x", distillation["summary"])
+            self.assertIn("distillation_failed", saved_manifest["risk_flags"])
+
+    def test_run_video_pipeline_does_not_overwrite_existing_distillation_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            run_dir = store.run_path(state.run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                run_dir / "distillation.json",
+                {
+                    "status": "distilled",
+                    "model": "previous-distiller",
+                    "candidate_title": "Previous candidate",
+                    "ria": {},
+                },
+            )
+            distiller_client = FakeDistillerClient()
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=distiller_client,
+            )
+
+            distillation = read_json(store.run_path(result.run_id) / "distillation.json")
+            self.assertEqual(distillation["model"], "previous-distiller")
+            self.assertEqual(distiller_client.calls, 0)
 
     def test_run_video_pipeline_writes_failure_audit_chain(self):
         with tempfile.TemporaryDirectory() as temp_dir:

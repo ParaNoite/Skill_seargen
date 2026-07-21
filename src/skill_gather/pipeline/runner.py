@@ -25,9 +25,9 @@ from ..models import (
     SkillPackageMetadata,
     VideoSourceManifest,
 )
-from ..packaging import write_audit_package
+from ..packaging import write_audit_package, write_candidate_package
 from ..runs import RunStore, read_json, write_json
-from ..scoring import conservative_score
+from ..scoring import conservative_score, has_single_channel_evidence, rule_score_for_distillation
 from ..source import SourceInfo
 
 
@@ -65,6 +65,27 @@ class VisionClient(Protocol):
         ...
 
 
+class DistillerClient(Protocol):
+    def distill_skill(
+        self,
+        evidence_timeline: dict[str, Any],
+        manifest: dict[str, Any],
+        model: str,
+    ) -> dict[str, Any]:
+        ...
+
+
+class JudgeClient(Protocol):
+    def judge_skill(
+        self,
+        distillation: dict[str, Any],
+        evidence_timeline: dict[str, Any],
+        manifest: dict[str, Any],
+        model: str,
+    ) -> dict[str, Any]:
+        ...
+
+
 def run_video_pipeline(
     *,
     config: AppConfig,
@@ -77,6 +98,8 @@ def run_video_pipeline(
     media_processor: MediaProcessor | None = None,
     asr_client: AsrClient | None = None,
     vision_client: VisionClient | None = None,
+    distiller_client: DistillerClient | None = None,
+    judge_client: JudgeClient | None = None,
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
@@ -91,6 +114,8 @@ def run_video_pipeline(
     newapi = NewApiClient.from_config(config.newapi)
     asr = asr_client or newapi
     vision = vision_client or newapi
+    distiller = distiller_client or newapi
+    judge = judge_client or newapi
     _run_regular_stage(
         store,
         state,
@@ -122,8 +147,13 @@ def run_video_pipeline(
         lambda: _write_vision_result(store, state, config, vision),
     )
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
-    _run_regular_stage(store, state, "distill", lambda: _write_distillation(store, state))
-    _run_regular_stage(store, state, "score", lambda: _write_score(store, state))
+    _run_regular_stage(
+        store,
+        state,
+        "distill",
+        lambda: _write_distillation(store, state, config, distiller),
+    )
+    _run_regular_stage(store, state, "score", lambda: _write_score(store, state, config, judge))
     _run_package_stage(config, store, state, manifest, out_dir)
     return state
 
@@ -652,25 +682,125 @@ def vision_evidence_items(vision: dict[str, Any]) -> list[EvidenceItem]:
     return items
 
 
-def _write_distillation(store: RunStore, state: RunState) -> None:
+def _write_distillation(
+    store: RunStore,
+    state: RunState,
+    config: AppConfig,
+    distiller_client: DistillerClient | None,
+) -> None:
     path = store.run_path(state.run_id) / "distillation.json"
     if not path.exists():
-        write_json(
-            path,
-            {
-                "status": "skipped",
-                "reason": "RIA++ distillation is not implemented yet",
-                "candidate_title": "",
-            },
-        )
+        timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
+        manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        if not timeline.items:
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": "no evidence items are available for RIA++ distillation",
+                    "candidate_title": "",
+                },
+            )
+        elif distiller_client is None:
+            _append_manifest_risk(store, state, "distillation_skipped")
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": "newapi API key is not configured",
+                    "requires": ["newapi"],
+                    "model": config.newapi.distiller_model,
+                    "candidate_title": "",
+                },
+            )
+        else:
+            try:
+                result = distiller_client.distill_skill(
+                    timeline.to_dict(),
+                    manifest.to_dict(),
+                    config.newapi.distiller_model,
+                )
+            except NewApiError as exc:
+                _append_manifest_risk(store, state, "distillation_failed")
+                write_json(
+                    path,
+                    {
+                        "status": "failed",
+                        "reason_code": exc.code,
+                        "returncode": exc.status_code,
+                        "summary": exc.safe_summary,
+                        "model": config.newapi.distiller_model,
+                        "candidate_title": "",
+                    },
+                )
+            else:
+                result["model"] = config.newapi.distiller_model
+                write_json(path, result)
     state.artifacts["distillation"] = str(path)
 
 
-def _write_score(store: RunStore, state: RunState) -> None:
+def _write_score(
+    store: RunStore,
+    state: RunState,
+    config: AppConfig,
+    judge_client: JudgeClient | None,
+) -> None:
     path = store.run_path(state.run_id) / "score.json"
     if not path.exists():
-        score = conservative_score(rule_score=0, llm_judge_score=0)
-        write_json(path, score.to_dict())
+        timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
+        manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        distillation = read_json(store.run_path(state.run_id) / "distillation.json")
+        rule_score = rule_score_for_distillation(distillation, timeline)
+        single_channel = has_single_channel_evidence(timeline)
+        judge_record: dict[str, Any]
+        if distillation.get("status") != "distilled":
+            judge_score = 0
+            judge_record = {
+                "status": "skipped",
+                "reason": "distillation did not produce a candidate draft",
+            }
+        elif judge_client is None:
+            _append_manifest_risk(store, state, "judge_skipped")
+            judge_score = 0
+            judge_record = {
+                "status": "skipped",
+                "reason": "newapi API key is not configured",
+                "requires": ["newapi"],
+                "model": config.newapi.judge_model,
+            }
+        else:
+            try:
+                judge_record = judge_client.judge_skill(
+                    distillation,
+                    timeline.to_dict(),
+                    manifest.to_dict(),
+                    config.newapi.judge_model,
+                )
+            except NewApiError as exc:
+                _append_manifest_risk(store, state, "judge_failed")
+                judge_score = 0
+                judge_record = {
+                    "status": "failed",
+                    "reason_code": exc.code,
+                    "returncode": exc.status_code,
+                    "summary": exc.safe_summary,
+                    "model": config.newapi.judge_model,
+                }
+            else:
+                judge_score = int(judge_record.get("score", 0))
+                judge_record["model"] = config.newapi.judge_model
+                for flag in judge_record.get("risk_flags", []):
+                    if str(flag) == "single_channel_evidence":
+                        single_channel = True
+        score = conservative_score(
+            rule_score=rule_score,
+            llm_judge_score=judge_score,
+            single_channel_evidence=single_channel,
+        )
+        payload = score.to_dict()
+        payload["judge"] = judge_record
+        payload["single_channel_evidence"] = single_channel
+        write_json(path, payload)
     state.artifacts["score"] = str(path)
 
 
@@ -688,6 +818,9 @@ def _run_package_stage(
     manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
     score = ScoreResult.from_dict(read_json(store.run_path(state.run_id) / "score.json"))
     timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
+    risk_flags = list(manifest.risk_flags)
+    if score.final_status == "failed":
+        risk_flags.append("insufficient_evidence")
     metadata = SkillPackageMetadata(
         source=manifest.source,
         source_id=manifest.source_id,
@@ -703,9 +836,26 @@ def _run_package_stage(
             "judge": config.newapi.judge_model,
         },
         evidence=timeline.items,
-        risk_flags=[*manifest.risk_flags, "insufficient_evidence"],
+        risk_flags=risk_flags,
         scores=score,
     )
+    write_json(store.run_path(state.run_id) / "metadata.json", metadata.to_dict())
+
+    if score.final_status in {"passed", "needs_review"}:
+        state.status = "completed"
+        state.failure_reason = None
+        state.artifacts["candidate_out_dir"] = str(Path(out_dir))
+        _mark_completed(store, state, "package")
+        distillation = read_json(store.run_path(state.run_id) / "distillation.json")
+        package_path = write_candidate_package(
+            out_dir,
+            metadata,
+            distillation,
+            evidence_timeline=timeline,
+        )
+        state.artifacts["package"] = str(package_path)
+        store.save(state)
+        return
 
     state.status = "failed"
     media_probe_path = store.run_path(state.run_id) / "media_probe.json"
@@ -725,9 +875,14 @@ def _run_package_stage(
         reason_code = media_extract.get("reason_code", "media_download_failed")
         state.failure_reason = f"media extraction failed: {reason_code}"
     else:
-        state.failure_reason = (
-            "insufficient evidence: RIA++ distillation and successful candidate packaging are not implemented yet"
-        )
+        score_record = read_json(store.run_path(state.run_id) / "score.json")
+        judge_record = score_record.get("judge", {}) if isinstance(score_record, dict) else {}
+        if isinstance(judge_record, dict) and judge_record.get("status") == "skipped":
+            state.failure_reason = f"insufficient evidence: {judge_record.get('reason', 'judge skipped')}"
+        elif isinstance(judge_record, dict) and judge_record.get("status") == "failed":
+            state.failure_reason = f"insufficient evidence: judge failed: {judge_record.get('reason_code', 'judge_failed')}"
+        else:
+            state.failure_reason = "insufficient evidence: final score is below the candidate threshold"
     state.artifacts["candidate_out_dir"] = str(Path(out_dir))
     _mark_completed(store, state, "package")
     frame_index = read_frame_index(store, state.run_id)
