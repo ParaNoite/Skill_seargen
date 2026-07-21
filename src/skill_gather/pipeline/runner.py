@@ -7,9 +7,10 @@ from typing import Any, Protocol
 
 from ..adapters.bilibili import manifest_from_yt_dlp_metadata
 from ..config import AppConfig
-from ..integrations import YtDlpClient, YtDlpError
+from ..integrations import FfmpegClient, FfmpegError, YtDlpClient, YtDlpError
 from ..models import (
     EvidenceTimeline,
+    FrameManifest,
     PIPELINE_STAGES,
     RunState,
     ScoreResult,
@@ -32,6 +33,20 @@ class MediaDownloader(Protocol):
         ...
 
 
+class MediaProcessor(Protocol):
+    def extract_audio(self, media_file: str | Path, target_path: str | Path) -> dict[str, Any]:
+        ...
+
+    def extract_frames(
+        self,
+        media_file: str | Path,
+        target_dir: str | Path,
+        *,
+        interval_sec: int = 10,
+    ) -> dict[str, Any]:
+        ...
+
+
 def run_video_pipeline(
     *,
     config: AppConfig,
@@ -41,6 +56,7 @@ def run_video_pipeline(
     out_dir: str | Path,
     metadata_probe: MetadataProbe | None = None,
     media_downloader: MediaDownloader | None = None,
+    media_processor: MediaProcessor | None = None,
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
@@ -51,6 +67,7 @@ def run_video_pipeline(
 
     probe = metadata_probe or YtDlpClient()
     downloader = media_downloader or YtDlpClient()
+    processor = media_processor or FfmpegClient()
     _run_regular_stage(
         store,
         state,
@@ -63,7 +80,12 @@ def run_video_pipeline(
         "media_extract",
         lambda: _write_media_extract(store, state, downloader),
     )
-    _run_regular_stage(store, state, "frame_extract", lambda: _write_frame_index(store, state))
+    _run_regular_stage(
+        store,
+        state,
+        "frame_extract",
+        lambda: _write_frame_extract(store, state, processor),
+    )
     _run_regular_stage(store, state, "asr", lambda: _write_asr_result(store, state))
     _run_regular_stage(store, state, "vision_ocr", lambda: _write_vision_result(store, state))
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
@@ -212,11 +234,138 @@ def media_download_record(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _write_frame_index(store: RunStore, state: RunState) -> None:
-    path = store.frame_index_path(state.run_id)
-    if not path.exists():
-        write_json(path, [])
-    state.artifacts["frame_index"] = str(path)
+def _write_frame_extract(
+    store: RunStore,
+    state: RunState,
+    media_processor: MediaProcessor,
+) -> None:
+    path = store.run_path(state.run_id) / "frame_extract.json"
+    existing = read_json(path) if path.exists() else {}
+    if existing.get("status") in {"extracted", "failed"}:
+        state.artifacts["frame_extract"] = str(path)
+        return
+
+    media_extract = read_json(store.run_path(state.run_id) / "media_extract.json")
+    media_files = media_extract.get("media_files", [])
+    if not isinstance(media_files, list) or not media_files:
+        write_json(
+            path,
+            {
+                "status": "skipped",
+                "reason": "no downloaded media file is available",
+            },
+        )
+        state.artifacts["frame_extract"] = str(path)
+        return
+
+    media_file = resolve_media_file(media_files[0], media_extract, store.run_path(state.run_id))
+    if not media_file.exists():
+        write_json(
+            path,
+            {
+                "status": "failed",
+                "reason_code": "media_file_missing",
+                "source_media": str(media_file),
+            },
+        )
+        state.artifacts["frame_extract"] = str(path)
+        return
+
+    audio_path = store.run_path(state.run_id) / "audio.wav"
+    audio_record_path = store.run_path(state.run_id) / "audio.json"
+    frames_dir = store.run_path(state.run_id) / "frames"
+    try:
+        audio_result = media_processor.extract_audio(media_file, audio_path)
+    except FfmpegError as exc:
+        audio_result = {
+            "status": "failed",
+            "reason_code": exc.code,
+            "returncode": exc.returncode,
+            "summary": exc.safe_summary,
+            "audio_path": str(audio_path),
+            "source_media": str(media_file),
+        }
+        write_json(audio_record_path, audio_result)
+        write_json(
+            path,
+            {
+                "status": "failed",
+                "reason_code": exc.code,
+                "returncode": exc.returncode,
+                "summary": exc.safe_summary,
+                "source_media": str(media_file),
+            },
+        )
+        state.artifacts["audio"] = str(audio_record_path)
+        state.artifacts["frame_extract"] = str(path)
+        return
+    else:
+        write_json(audio_record_path, audio_result)
+        state.artifacts["audio"] = str(audio_record_path)
+
+    try:
+        frame_result = media_processor.extract_frames(media_file, frames_dir, interval_sec=10)
+    except FfmpegError as exc:
+        write_json(
+            path,
+            {
+                "status": "failed",
+                "reason_code": exc.code,
+                "returncode": exc.returncode,
+                "summary": exc.safe_summary,
+                "source_media": str(media_file),
+                "audio_path": str(audio_path),
+            },
+        )
+        manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        manifest.risk_flags.append("frame_extract_failed")
+        store.save_manifest(state.run_id, manifest)
+        state.artifacts["frame_extract"] = str(path)
+        return
+
+    frame_paths = frame_result.get("frame_paths", [])
+    frame_entries: list[FrameManifest] = []
+    if isinstance(frame_paths, list):
+        for index, frame_path in enumerate(frame_paths):
+            frame_entries.append(
+                FrameManifest(
+                    timestamp=seconds_to_timestamp(index * int(frame_result.get("interval_sec", 10))),
+                    frame_path=str(frame_path),
+                    reason="ffmpeg_interval",
+                    visual_type="video_frame",
+                )
+            )
+
+    write_json(path, frame_result | {"status": "extracted", "frame_count": len(frame_entries)})
+    write_json(
+        store.frame_index_path(state.run_id),
+        [frame.to_dict() for frame in frame_entries],
+    )
+    state.artifacts["frame_extract"] = str(path)
+    state.artifacts["frame_index"] = str(store.frame_index_path(state.run_id))
+
+
+def resolve_media_file(raw_media_file: Any, media_extract: dict[str, Any], run_dir: Path) -> Path:
+    media_file = Path(str(raw_media_file))
+    if media_file.is_absolute():
+        return media_file
+
+    candidates = [media_file, run_dir / media_file]
+    target_dir = media_extract.get("target_dir")
+    if target_dir:
+        target = Path(str(target_dir))
+        candidates.extend([target / media_file, target / media_file.name])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[-1]
+
+
+def seconds_to_timestamp(total_seconds: int) -> str:
+    hours, remainder = divmod(max(total_seconds, 0), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def _write_asr_result(store: RunStore, state: RunState) -> None:
@@ -339,13 +488,24 @@ def _run_package_stage(
         )
     state.artifacts["candidate_out_dir"] = str(Path(out_dir))
     _mark_completed(store, state, "package")
+    frame_index = read_frame_index(store, state.run_id)
     package_path = write_audit_package(
         store.run_path(state.run_id),
         metadata,
         run_state=state,
         evidence_timeline=timeline,
-        frame_index=[],
+        frame_index=frame_index,
         failure_reason=state.failure_reason,
     )
     state.artifacts["package"] = str(package_path)
     store.save(state)
+
+
+def read_frame_index(store: RunStore, run_id: str) -> list[FrameManifest]:
+    path = store.frame_index_path(run_id)
+    if not path.exists():
+        return []
+    raw = read_json(path)
+    if not isinstance(raw, list):
+        return []
+    return [FrameManifest.from_dict(item) for item in raw if isinstance(item, dict)]

@@ -1,12 +1,14 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from skill_gather.adapters.bilibili import build_initial_manifest
 from skill_gather.config import parse_config
-from skill_gather.integrations import YtDlpError
+from skill_gather.integrations import FfmpegError, YtDlpError
 from skill_gather.models import PIPELINE_STAGES
 from skill_gather.pipeline import run_video_pipeline
+from skill_gather.pipeline.runner import resolve_media_file
 from skill_gather.runs import RunStore, read_json, write_json
 from skill_gather.source import infer_source
 
@@ -47,7 +49,6 @@ class FakeMediaDownloader:
             "status": "downloaded",
             "target_dir": "",
             "output_template": "%(id)s.%(ext)s",
-            "media_files": ["runs/demo/media/BV1xx411c7mD.mp4"],
             "returncode": 0,
         }
         self.error = error
@@ -55,9 +56,52 @@ class FakeMediaDownloader:
     def download_media(self, url, target_dir):
         if self.error is not None:
             raise self.error
+        target = Path(target_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        media_file = target / "BV1xx411c7mD.mp4"
+        media_file.write_text("placeholder", encoding="utf-8")
         result = dict(self.result)
         result["target_dir"] = str(target_dir)
+        if "media_files" not in result:
+            result["media_files"] = [str(media_file)]
         return result
+
+
+class FakeMediaProcessor:
+    def __init__(self, audio_error: Exception | None = None, frame_error: Exception | None = None):
+        self.audio_error = audio_error
+        self.frame_error = frame_error
+
+    def extract_audio(self, media_file, target_path):
+        if self.audio_error is not None:
+            raise self.audio_error
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("audio placeholder", encoding="utf-8")
+        return {
+            "status": "extracted",
+            "audio_path": str(target),
+            "source_media": str(media_file),
+            "returncode": 0,
+        }
+
+    def extract_frames(self, media_file, target_dir, *, interval_sec=10):
+        if self.frame_error is not None:
+            raise self.frame_error
+        target = Path(target_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        frames = [target / "frame-000001.jpg", target / "frame-000002.jpg"]
+        for frame in frames:
+            frame.write_text("frame placeholder", encoding="utf-8")
+        return {
+            "status": "extracted",
+            "frame_dir": str(target),
+            "frame_pattern": "frame-%06d.jpg",
+            "frame_paths": [str(frame) for frame in frames],
+            "interval_sec": interval_sec,
+            "source_media": str(media_file),
+            "returncode": 0,
+        }
 
 
 class PipelineTests(unittest.TestCase):
@@ -86,6 +130,7 @@ class PipelineTests(unittest.TestCase):
                     }
                 ),
                 media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -95,6 +140,9 @@ class PipelineTests(unittest.TestCase):
             metadata = read_json(run_dir / "metadata.json")
             media_probe = read_json(run_dir / "media_probe.json")
             media_extract = read_json(run_dir / "media_extract.json")
+            audio = read_json(run_dir / "audio.json")
+            frame_extract = read_json(run_dir / "frame_extract.json")
+            frame_index = read_json(run_dir / "frame_index.json")
             self.assertEqual(saved_manifest["title"], "Skill Demo")
             self.assertEqual(saved_manifest["duration_sec"], 120)
             self.assertEqual(metadata["title"], "Skill Demo")
@@ -103,6 +151,10 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(media_extract["status"], "downloaded")
             self.assertIn("media", media_extract["target_dir"])
             self.assertIn("BV1xx411c7mD.mp4", media_extract["media_files"][0])
+            self.assertEqual(audio["status"], "extracted")
+            self.assertEqual(frame_extract["status"], "extracted")
+            self.assertEqual(frame_extract["frame_count"], 2)
+            self.assertEqual(frame_index[1]["timestamp"], "00:00:10")
             self.assertTrue((run_dir / "media_extract.json").exists())
             self.assertTrue((run_dir / "frame_index.json").exists())
             self.assertTrue((run_dir / "asr.json").exists())
@@ -137,6 +189,7 @@ class PipelineTests(unittest.TestCase):
                     )
                 ),
                 media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -181,6 +234,7 @@ class PipelineTests(unittest.TestCase):
                         returncode=2,
                     )
                 ),
+                media_processor=FakeMediaProcessor(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -227,6 +281,7 @@ class PipelineTests(unittest.TestCase):
                         "returncode": 0,
                     }
                 ),
+                media_processor=FakeMediaProcessor(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -236,6 +291,63 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(media_extract["status"], "downloaded")
             self.assertEqual(media_extract["media_files"], ["safe.mp4"])
             self.assertNotIn("stderr", media_extract)
+
+    def test_run_video_pipeline_records_audio_extract_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(
+                    audio_error=FfmpegError(
+                        "ffmpeg failed https://example.test/tmp token=x",
+                        code="audio_extract_failed",
+                        returncode=3,
+                    )
+                ),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            audio = read_json(run_dir / "audio.json")
+            frame_extract = read_json(run_dir / "frame_extract.json")
+            self.assertEqual(audio["status"], "failed")
+            self.assertEqual(frame_extract["status"], "failed")
+            self.assertEqual(frame_extract["reason_code"], "audio_extract_failed")
+            self.assertNotIn("token=x", frame_extract["summary"])
+
+    def test_resolve_media_file_accepts_cwd_relative_download_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media_dir = root / "runs" / "demo" / "media"
+            media_dir.mkdir(parents=True)
+            media_file = media_dir / "BV1xx411c7mD.mp4"
+            media_file.write_text("placeholder", encoding="utf-8")
+            raw_path = media_file.relative_to(root)
+            original_cwd = Path.cwd()
+
+            try:
+                os.chdir(root)
+                resolved = resolve_media_file(
+                    raw_path,
+                    {"target_dir": str(media_dir.relative_to(root))},
+                    root / "runs" / "demo",
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(resolved, raw_path)
 
 
 if __name__ == "__main__":
