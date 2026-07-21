@@ -61,6 +61,19 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue((target / "failure_report.md").exists())
             metadata_payload = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata_payload["package_status"], "failed")
+            report = (target / "failure_report.md").read_text(encoding="utf-8")
+            self.assertIn("- source: bilibili BV1xx411c7mD", report)
+            self.assertIn("- source_url: https://www.bilibili.com/video/BV1xx411c7mD/", report)
+            self.assertIn("- run_id: bilibili-BV1xx411c7mD", report)
+            self.assertIn("- run_status: failed", report)
+            self.assertIn("- reason: insufficient evidence", report)
+            self.assertIn("- completed_stages: none", report)
+            self.assertIn("- risk_flags: insufficient_evidence", report)
+            self.assertIn("- evidence_items: 1", report)
+            self.assertIn("- frame_index_items: 1", report)
+            self.assertIn("## Available Evidence", report)
+            self.assertIn("00:00:01 [asr] intro", report)
+            self.assertIn("## Suggested Rerun", report)
 
     def test_write_candidate_package_includes_human_review_summary_and_evidence_trace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
