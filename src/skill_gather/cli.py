@@ -4,11 +4,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from .adapters.bilibili import build_initial_manifest
 from .config import ConfigError, load_config
-from .models import SkillPackageMetadata, VideoSourceManifest
+from .models import EvidenceTimeline, SkillPackageMetadata, VideoSourceManifest
 from .pipeline import run_video_pipeline
 from .runs import RunStore, read_json
 from .source import SourceInferenceError, infer_source
@@ -69,10 +69,26 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         "status": state.status,
         "current_stage": state.current_stage,
         "out": args.out,
-        "message": "已跑完最小管线；当前因证据不足生成失败审计包。",
+        "message": _video_message(state),
     }
+    if state.failure_reason:
+        payload["failure_reason"] = state.failure_reason
+    if state.artifacts.get("package"):
+        payload["package"] = state.artifacts["package"]
     print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
     return 0
+
+
+def _video_message(state: Any) -> str:
+    if state.status == "completed":
+        if state.artifacts.get("package"):
+            return "已生成候选 skill 包；请用 inspect 复核证据、风险与评分。"
+        return "视频处理已完成；请用 inspect 复核 run 摘要。"
+    if state.status == "failed":
+        if state.artifacts.get("package"):
+            return "处理未达到候选阈值，已生成失败审计包；请用 inspect 复核原因。"
+        return "处理失败；请用 inspect 查看失败原因和已保留产物。"
+    return "视频处理已启动或恢复；请用 inspect 查看当前进度。"
 
 
 def handle_score(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -116,6 +132,7 @@ def handle_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> 
     if state.failure_reason:
         print(f"失败原因: {state.failure_reason}", file=stdout)
 
+    risk_flags: list[str] = []
     manifest_path = store.manifest_path(state.run_id)
     if manifest_path.exists():
         manifest = VideoSourceManifest.from_dict(read_json(manifest_path))
@@ -124,25 +141,155 @@ def handle_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> 
             file=stdout,
         )
         if manifest.risk_flags:
+            risk_flags.extend(manifest.risk_flags)
             print(f"manifest 风险: {', '.join(manifest.risk_flags)}", file=stdout)
     else:
         print("manifest: 尚未生成", file=stdout)
 
-    if store.evidence_timeline_path(state.run_id).exists():
-        print("证据摘要: 已生成 EvidenceTimeline", file=stdout)
-    else:
-        print("证据摘要: 尚未生成 EvidenceTimeline", file=stdout)
-
     metadata_path = store.run_path(state.run_id) / "metadata.json"
+    metadata: SkillPackageMetadata | None = None
     if metadata_path.exists():
         metadata = SkillPackageMetadata.from_dict(read_json(metadata_path))
+        risk_flags.extend(metadata.risk_flags)
+
+    _print_evidence_summary(store, state.run_id, stdout)
+    unique_risks = _unique(risk_flags)
+    print(f"风险: {', '.join(unique_risks) if unique_risks else '无'}", file=stdout)
+    _print_score_summary(store, state.run_id, metadata, stdout)
+    _print_artifacts(state.artifacts, stdout)
+    return 0
+
+
+def _print_evidence_summary(store: RunStore, run_id: str, stdout: TextIO) -> None:
+    path = store.evidence_timeline_path(run_id)
+    if not path.exists():
+        print("证据摘要: 尚未生成 EvidenceTimeline", file=stdout)
+        return
+
+    timeline = EvidenceTimeline.from_dict(read_json(path))
+    print(
+        "证据摘要: "
+        f"{len(timeline.items)} 条 EvidenceTimeline item；"
+        f"frame_budget={timeline.frame_budget}；"
+        f"strategy={timeline.sampling_strategy}",
+        file=stdout,
+    )
+    if not timeline.items:
+        print("  - 无可展示证据", file=stdout)
+        return
+
+    max_items = 5
+    for item in timeline.items[:max_items]:
+        confidence = f"{item.confidence:.2f}"
         print(
-            f"评分: {metadata.scores.final_score} ({metadata.scores.final_status})",
+            f"  - {item.timestamp} [{item.type}] {_truncate(item.claim)} "
+            f"(confidence={confidence})",
+            file=stdout,
+        )
+    remaining = len(timeline.items) - max_items
+    if remaining > 0:
+        print(f"  - ... 还有 {remaining} 条证据未展示", file=stdout)
+
+
+def _print_score_summary(
+    store: RunStore,
+    run_id: str,
+    metadata: SkillPackageMetadata | None,
+    stdout: TextIO,
+) -> None:
+    score_record = _read_optional_json(store.run_path(run_id) / "score.json")
+    if metadata is not None:
+        scores = metadata.scores
+        print(f"评分: {scores.final_score} ({scores.final_status})", file=stdout)
+        print(
+            "评分细节: "
+            f"rule={scores.rule_score}, "
+            f"judge={scores.llm_judge_score}, "
+            f"policy={scores.conflict_policy}",
+            file=stdout,
+        )
+    elif score_record:
+        print(
+            f"评分: {score_record.get('final_score', 0)} "
+            f"({score_record.get('final_status', 'failed')})",
+            file=stdout,
+        )
+        print(
+            "评分细节: "
+            f"rule={score_record.get('rule_score', 0)}, "
+            f"judge={score_record.get('llm_judge_score', 0)}, "
+            f"policy={score_record.get('conflict_policy', 'conservative')}",
             file=stdout,
         )
     else:
         print("评分: 尚未生成", file=stdout)
-    return 0
+        return
+
+    judge = score_record.get("judge", {}) if isinstance(score_record, dict) else {}
+    if isinstance(judge, dict) and judge:
+        status = str(judge.get("status", "unknown"))
+        score = judge.get("score")
+        prefix = f"LLM judge: {status}"
+        if score is not None:
+            prefix += f" score={score}"
+        rationale = str(judge.get("rationale") or judge.get("reason") or "").strip()
+        if rationale:
+            prefix += f"; {_truncate(rationale, max_length=120)}"
+        print(prefix, file=stdout)
+        judge_risks = judge.get("risk_flags", [])
+        if isinstance(judge_risks, list) and judge_risks:
+            print(f"judge 风险: {', '.join(str(flag) for flag in judge_risks)}", file=stdout)
+
+
+def _print_artifacts(artifacts: dict[str, str], stdout: TextIO) -> None:
+    if not artifacts:
+        print("产物: 尚未记录", file=stdout)
+        return
+
+    print("产物:", file=stdout)
+    preferred_order = [
+        "manifest",
+        "media_probe",
+        "media_extract",
+        "frame_extract",
+        "frame_index",
+        "asr",
+        "vision_ocr",
+        "evidence_timeline",
+        "distillation",
+        "score",
+        "candidate_out_dir",
+        "package",
+    ]
+    emitted: set[str] = set()
+    for key in preferred_order:
+        if key in artifacts:
+            print(f"  - {key}: {artifacts[key]}", file=stdout)
+            emitted.add(key)
+    for key in sorted(set(artifacts) - emitted):
+        print(f"  - {key}: {artifacts[key]}", file=stdout)
+
+
+def _read_optional_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    value = read_json(path)
+    return value if isinstance(value, dict) else {}
+
+
+def _unique(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
+
+
+def _truncate(value: str, max_length: int = 80) -> str:
+    clean = " ".join(value.split())
+    if len(clean) <= max_length:
+        return clean
+    return clean[: max_length - 1].rstrip() + "…"
 
 
 def main(
