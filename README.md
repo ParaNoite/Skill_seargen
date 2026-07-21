@@ -2,7 +2,7 @@
 
 本项目是一个自用的本地 CLI 原型，用于从 B站公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包。
 
-当前版本提供项目骨架、CLI 入口、核心数据结构、配置读取、来源识别、run 状态保存、yt-dlp/ffmpeg 薄包装、newapi ASR 与视觉/OCR 调用、`vision_ocr.json` 生成、ASR + 视觉证据合并到 `EvidenceTimeline`、基于证据的 RIA++ 草案蒸馏、规则分 + LLM judge 保守评分，以及通过阈值后的候选包生成；证据不足或外部能力不可用时会保留失败审计包。
+当前版本提供项目骨架、CLI 入口、核心数据结构、配置读取、来源识别、run 状态保存、yt-dlp/ffmpeg 薄包装、newapi ASR 与视觉/OCR 调用、`vision_ocr.json` 生成、ASR + 视觉证据合并到 `EvidenceTimeline`、基于证据的 RIA++ 草案蒸馏、规则分 + LLM judge 保守评分，以及通过阈值后的候选包生成；候选包会在 `README.md` 和 `SKILL.md` 中保留复核摘要与证据追溯，证据不足或外部能力不可用时会保留失败审计包。
 
 ## 项目规范
 
@@ -46,6 +46,7 @@ skill-gather inspect <run-id> --runs ./runs
 - 证据不足时应明确失败并保留审计包。
 - `score` 默认输出 JSON。
 - `inspect` 面向人工复核，优先展示证据摘要和评分。
+- 候选包 README 面向人工复核，默认包含来源、风险、评分和证据摘要。
 
 ## 目录边界
 

@@ -59,11 +59,13 @@ def write_candidate_package(
     ria = distillation.get("ria", {})
     if not isinstance(ria, dict):
         ria = {}
+    title = str(distillation.get("candidate_title") or metadata.title or package_name)
+    summary = str(distillation.get("summary", "")).strip()
 
     skill_lines = [
-        f"# {distillation.get('candidate_title', metadata.title or package_name)}",
+        f"# {title}",
         "",
-        str(distillation.get("summary", "")).strip(),
+        summary,
         "",
         "## Recall",
         "",
@@ -84,17 +86,43 @@ def write_candidate_package(
         "## Test",
         "",
         _markdown_value(ria.get("test")),
+        "",
+        "## Evidence Trace",
+        "",
+        *_evidence_markdown(evidence_timeline),
     ]
     (target / "SKILL.md").write_text("\n".join(skill_lines).rstrip() + "\n", encoding="utf-8")
 
     readme_lines = [
-        f"# {distillation.get('candidate_title', metadata.title or package_name)}",
+        f"# {title}",
+        "",
+        "## Review Summary",
         "",
         f"- source: {metadata.source} {metadata.source_id}",
+        f"- source_url: {metadata.source_url}",
         f"- package_status: {metadata.package_status}",
         f"- final_score: {metadata.scores.final_score}",
+        f"- rule_score: {metadata.scores.rule_score}",
+        f"- llm_judge_score: {metadata.scores.llm_judge_score}",
+        f"- conflict_policy: {metadata.scores.conflict_policy}",
+        f"- risk_flags: {_comma_list(metadata.risk_flags)}",
+        f"- evidence_items: {len(evidence_timeline.items)}",
+        f"- frame_budget: {evidence_timeline.frame_budget}",
+        f"- sampling_strategy: {evidence_timeline.sampling_strategy}",
         "",
-        str(distillation.get("summary", "")).strip(),
+        "## Summary",
+        "",
+        summary,
+        "",
+        "## Evidence Summary",
+        "",
+        *_evidence_markdown(evidence_timeline),
+        "",
+        "## Review Checklist",
+        "",
+        "- Confirm the candidate instructions are supported by the listed timestamped evidence.",
+        "- Confirm risk flags are acceptable before installing or reusing this skill.",
+        "- Re-run `skill-gather inspect <run-id>` when the original run directory is available.",
     ]
     (target / "README.md").write_text("\n".join(readme_lines).rstrip() + "\n", encoding="utf-8")
     write_json(target / "metadata.json", metadata.to_dict())
@@ -114,3 +142,30 @@ def _markdown_value(value: Any) -> str:
         lines = [f"- {str(item).strip()}" for item in value if str(item).strip()]
         return "\n".join(lines)
     return str(value or "").strip()
+
+
+def _evidence_markdown(timeline: EvidenceTimeline, *, limit: int = 5) -> list[str]:
+    if not timeline.items:
+        return ["- No evidence items recorded."]
+
+    lines = []
+    for item in timeline.items[:limit]:
+        lines.append(
+            f"- {item.timestamp} [{item.type}] {_single_line(item.claim)} "
+            f"(confidence={item.confidence:.2f})"
+        )
+    remaining = len(timeline.items) - limit
+    if remaining > 0:
+        lines.append(f"- ... {remaining} more evidence item(s) omitted from this summary.")
+    return lines
+
+
+def _comma_list(values: list[str]) -> str:
+    return ", ".join(values) if values else "none"
+
+
+def _single_line(value: str, *, max_length: int = 120) -> str:
+    clean = " ".join(str(value).split())
+    if len(clean) <= max_length:
+        return clean
+    return clean[: max_length - 1].rstrip() + "…"

@@ -8,9 +8,10 @@ from skill_gather.models import (
     EvidenceTimeline,
     FrameManifest,
     RunState,
+    ScoreResult,
     SkillPackageMetadata,
 )
-from skill_gather.packaging import write_audit_package
+from skill_gather.packaging import write_audit_package, write_candidate_package
 
 
 class PackagingTests(unittest.TestCase):
@@ -60,6 +61,76 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue((target / "failure_report.md").exists())
             metadata_payload = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata_payload["package_status"], "failed")
+
+    def test_write_candidate_package_includes_human_review_summary_and_evidence_trace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metadata = SkillPackageMetadata(
+                source="bilibili",
+                source_id="BV1xx411c7mD",
+                source_url="https://www.bilibili.com/video/BV1xx411c7mD/",
+                title="Editable Install Demo",
+                author="Teacher",
+                package_status="needs_review",
+                risk_flags=["no_subtitle", "single_channel_evidence"],
+                scores=ScoreResult(
+                    rule_score=82,
+                    llm_judge_score=86,
+                    final_score=82,
+                    final_status="needs_review",
+                ),
+            )
+            timeline = EvidenceTimeline(
+                video_duration_sec=120,
+                frame_budget=20,
+                sampling_strategy="ffmpeg_interval_10s",
+                items=[
+                    EvidenceItem(
+                        timestamp="00:00:03",
+                        type="asr",
+                        claim="讲解 editable install 的适用场景",
+                        confidence=0.76,
+                    ),
+                    EvidenceItem(
+                        timestamp="00:00:10",
+                        type="frame_ocr",
+                        claim="画面展示 python -m pip install -e .",
+                        confidence=0.91,
+                    ),
+                ],
+            )
+            distillation = {
+                "candidate_title": "Install editable Python package",
+                "summary": "A reusable local development install workflow.",
+                "ria": {
+                    "recall": "The video shows an editable install command.",
+                    "interpret": "Use editable installs during local package development.",
+                    "apply": ["Run python -m pip install -e ."],
+                    "boundary": "Only for Python packages with packaging metadata.",
+                    "test": ["Import the package after install."],
+                },
+            }
+
+            target = write_candidate_package(
+                Path(temp_dir) / "skills",
+                metadata,
+                distillation,
+                evidence_timeline=timeline,
+            )
+
+            readme = (target / "README.md").read_text(encoding="utf-8")
+            skill = (target / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("## Review Summary", readme)
+            self.assertIn("- source_url: https://www.bilibili.com/video/BV1xx411c7mD/", readme)
+            self.assertIn("- package_status: needs_review", readme)
+            self.assertIn("- final_score: 82", readme)
+            self.assertIn("- risk_flags: no_subtitle, single_channel_evidence", readme)
+            self.assertIn("## Evidence Summary", readme)
+            self.assertIn("00:00:10 [frame_ocr] 画面展示 python -m pip install -e .", readme)
+            self.assertIn("## Review Checklist", readme)
+            self.assertIn("## Evidence Trace", skill)
+            self.assertIn("00:00:03 [asr] 讲解 editable install 的适用场景", skill)
+            self.assertTrue((target / "metadata.json").exists())
+            self.assertTrue((target / "evidence_timeline.json").exists())
 
 
 if __name__ == "__main__":
