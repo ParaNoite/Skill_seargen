@@ -9,6 +9,7 @@ from typing import Any, TextIO
 from .adapters.bilibili import build_initial_manifest
 from .config import ConfigError, load_config
 from .models import EvidenceTimeline, SkillPackageMetadata, VideoSourceManifest
+from .mvp_check import run_mvp_check
 from .pipeline import run_video_pipeline
 from .runs import RunStore, read_json
 from .source import SourceInferenceError, infer_source
@@ -34,7 +35,27 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--runs", default="./runs", help="run 状态目录")
     inspect.set_defaults(handler=handle_inspect)
 
+    mvp_check = subcommands.add_parser("mvp-check", help="离线运行 v0.1 MVP 自检")
+    mvp_check.add_argument(
+        "--config",
+        default="configs/skill-gather.example.json",
+        help="配置文件路径",
+    )
+    mvp_check.set_defaults(handler=handle_mvp_check)
+
     return parser
+
+
+def handle_mvp_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        config = load_config(args.config)
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    payload = run_mvp_check(config)
+    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    return 0 if payload.get("status") == "passed" else 1
 
 
 def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:

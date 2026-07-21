@@ -51,6 +51,20 @@ class CliTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["scores"]["final_status"], "needs_review")
 
+    def test_mvp_check_outputs_json_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            stdout = io.StringIO()
+
+            exit_code = main(["mvp-check", "--config", str(config_path)], stdout=stdout)
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["checks"]["candidate_pipeline"]["status"], "passed")
+            self.assertEqual(payload["checks"]["failure_audit_pipeline"]["status"], "passed")
+
     def metadata_probe_success(self):
         return patch(
             "skill_gather.integrations.yt_dlp.YtDlpClient.probe_metadata",

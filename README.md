@@ -36,6 +36,7 @@ $env:NEWAPI_API_KEY="your-key"
 skill-gather video <bilibili-url> --config config.json --out ./skills --runs ./runs
 skill-gather score <skill-dir>
 skill-gather inspect <run-id> --runs ./runs
+skill-gather mvp-check --config configs/skill-gather.example.json
 ```
 
 ## v0.1 边界
@@ -47,6 +48,7 @@ skill-gather inspect <run-id> --runs ./runs
 - `score` 默认输出 JSON。
 - `inspect` 面向人工复核，优先展示证据摘要和评分。
 - 候选包 README 面向人工复核，默认包含来源、风险、评分和证据摘要。
+- `mvp-check` 使用临时目录和本地 fake clients 离线验证候选包与失败审计两条主分支。
 
 ## 目录边界
 
