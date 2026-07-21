@@ -7,7 +7,7 @@ VALID_CONFIG = {
     "providers": {
         "newapi": {
             "base_url": "https://api.renice.cc/v1",
-            "api_key_env": "NEWAPI_API_KEY",
+            "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
             "asr_model": "asr",
             "distiller_model": "distiller",
@@ -35,7 +35,7 @@ class ConfigTests(unittest.TestCase):
         raw["providers"] = {
             "newapi": {
                 "base_url": "https://api.renice.cc/v1",
-                "api_key_env": "NEWAPI_API_KEY",
+                "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             }
         }
 

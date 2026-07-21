@@ -5,7 +5,7 @@ from pathlib import Path
 
 from skill_gather.adapters.bilibili import build_initial_manifest
 from skill_gather.config import parse_config
-from skill_gather.integrations import FfmpegError, YtDlpError
+from skill_gather.integrations import FfmpegError, NewApiError, YtDlpError
 from skill_gather.models import PIPELINE_STAGES
 from skill_gather.pipeline import run_video_pipeline
 from skill_gather.pipeline.runner import resolve_media_file
@@ -17,7 +17,7 @@ CONFIG = {
     "providers": {
         "newapi": {
             "base_url": "https://api.renice.cc/v1",
-            "api_key_env": "NEWAPI_API_KEY",
+            "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
             "asr_model": "asr",
             "distiller_model": "distiller",
@@ -104,6 +104,24 @@ class FakeMediaProcessor:
         }
 
 
+class FakeAsrClient:
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+
+    def transcribe_audio(self, audio_file, model):
+        if self.error is not None:
+            raise self.error
+        return {
+            "status": "transcribed",
+            "model": model,
+            "audio_path": str(audio_file),
+            "text": "first step",
+            "language": "zh",
+            "segments": [{"start": 10.0, "end": 12.0, "text": "first step"}],
+            "returncode": 0,
+        }
+
+
 class PipelineTests(unittest.TestCase):
     def test_run_video_pipeline_writes_failure_audit_chain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -131,6 +149,7 @@ class PipelineTests(unittest.TestCase):
                 ),
                 media_downloader=FakeMediaDownloader(),
                 media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -143,6 +162,8 @@ class PipelineTests(unittest.TestCase):
             audio = read_json(run_dir / "audio.json")
             frame_extract = read_json(run_dir / "frame_extract.json")
             frame_index = read_json(run_dir / "frame_index.json")
+            asr = read_json(run_dir / "asr.json")
+            timeline = read_json(run_dir / "evidence_timeline.json")
             self.assertEqual(saved_manifest["title"], "Skill Demo")
             self.assertEqual(saved_manifest["duration_sec"], 120)
             self.assertEqual(metadata["title"], "Skill Demo")
@@ -155,6 +176,9 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(frame_extract["status"], "extracted")
             self.assertEqual(frame_extract["frame_count"], 2)
             self.assertEqual(frame_index[1]["timestamp"], "00:00:10")
+            self.assertEqual(asr["status"], "transcribed")
+            self.assertEqual(timeline["items"][0]["type"], "asr")
+            self.assertEqual(timeline["items"][0]["timestamp"], "00:00:10")
             self.assertTrue((run_dir / "media_extract.json").exists())
             self.assertTrue((run_dir / "frame_index.json").exists())
             self.assertTrue((run_dir / "asr.json").exists())
@@ -190,6 +214,7 @@ class PipelineTests(unittest.TestCase):
                 ),
                 media_downloader=FakeMediaDownloader(),
                 media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -235,6 +260,7 @@ class PipelineTests(unittest.TestCase):
                     )
                 ),
                 media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -282,6 +308,7 @@ class PipelineTests(unittest.TestCase):
                     }
                 ),
                 media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -317,6 +344,7 @@ class PipelineTests(unittest.TestCase):
                         returncode=3,
                     )
                 ),
+                asr_client=FakeAsrClient(),
             )
 
             run_dir = store.run_path(result.run_id)
@@ -326,6 +354,43 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(frame_extract["status"], "failed")
             self.assertEqual(frame_extract["reason_code"], "audio_extract_failed")
             self.assertNotIn("token=x", frame_extract["summary"])
+
+    def test_run_video_pipeline_records_asr_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(
+                    NewApiError(
+                        "newapi failed https://example.test/tmp token=x",
+                        code="transcription_failed",
+                        status_code=500,
+                    )
+                ),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            saved_manifest = read_json(run_dir / "manifest.json")
+            asr = read_json(run_dir / "asr.json")
+            self.assertEqual(asr["status"], "failed")
+            self.assertEqual(asr["reason_code"], "transcription_failed")
+            self.assertEqual(asr["returncode"], 500)
+            self.assertIn("asr_failed", saved_manifest["risk_flags"])
+            self.assertNotIn("token=x", asr["summary"])
 
     def test_resolve_media_file_accepts_cwd_relative_download_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:

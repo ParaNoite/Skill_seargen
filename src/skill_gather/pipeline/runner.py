@@ -7,9 +7,17 @@ from typing import Any, Protocol
 
 from ..adapters.bilibili import manifest_from_yt_dlp_metadata
 from ..config import AppConfig
-from ..integrations import FfmpegClient, FfmpegError, YtDlpClient, YtDlpError
+from ..integrations import (
+    FfmpegClient,
+    FfmpegError,
+    NewApiClient,
+    NewApiError,
+    YtDlpClient,
+    YtDlpError,
+)
 from ..models import (
     EvidenceTimeline,
+    EvidenceItem,
     FrameManifest,
     PIPELINE_STAGES,
     RunState,
@@ -47,6 +55,11 @@ class MediaProcessor(Protocol):
         ...
 
 
+class AsrClient(Protocol):
+    def transcribe_audio(self, audio_file: str | Path, model: str) -> dict[str, Any]:
+        ...
+
+
 def run_video_pipeline(
     *,
     config: AppConfig,
@@ -57,6 +70,7 @@ def run_video_pipeline(
     metadata_probe: MetadataProbe | None = None,
     media_downloader: MediaDownloader | None = None,
     media_processor: MediaProcessor | None = None,
+    asr_client: AsrClient | None = None,
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
@@ -68,6 +82,7 @@ def run_video_pipeline(
     probe = metadata_probe or YtDlpClient()
     downloader = media_downloader or YtDlpClient()
     processor = media_processor or FfmpegClient()
+    asr = asr_client or NewApiClient.from_config(config.newapi)
     _run_regular_stage(
         store,
         state,
@@ -86,7 +101,12 @@ def run_video_pipeline(
         "frame_extract",
         lambda: _write_frame_extract(store, state, processor),
     )
-    _run_regular_stage(store, state, "asr", lambda: _write_asr_result(store, state))
+    _run_regular_stage(
+        store,
+        state,
+        "asr",
+        lambda: _write_asr_result(store, state, config, asr),
+    )
     _run_regular_stage(store, state, "vision_ocr", lambda: _write_vision_result(store, state))
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
     _run_regular_stage(store, state, "distill", lambda: _write_distillation(store, state))
@@ -368,17 +388,73 @@ def seconds_to_timestamp(total_seconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def _write_asr_result(store: RunStore, state: RunState) -> None:
+def _write_asr_result(
+    store: RunStore,
+    state: RunState,
+    config: AppConfig,
+    asr_client: AsrClient | None,
+) -> None:
     path = store.run_path(state.run_id) / "asr.json"
     if not path.exists():
-        write_json(
-            path,
-            {
-                "status": "skipped",
-                "reason": "ASR integration is not implemented yet",
-                "items": [],
-            },
-        )
+        audio_path = store.run_path(state.run_id) / "audio.json"
+        if not audio_path.exists():
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": "audio extraction is not available yet",
+                    "items": [],
+                },
+            )
+        else:
+            audio = read_json(audio_path)
+            if audio.get("status") != "extracted":
+                write_json(
+                    path,
+                    {
+                        "status": "skipped",
+                        "reason": "audio is not ready for transcription",
+                        "items": [],
+                    },
+                )
+            elif asr_client is None:
+                write_json(
+                    path,
+                    {
+                        "status": "skipped",
+                        "reason": "newapi API key is not configured",
+                        "requires": ["newapi"],
+                        "model": config.newapi.asr_model,
+                        "audio_path": audio.get("audio_path", ""),
+                        "items": [],
+                    },
+                )
+            else:
+                try:
+                    result = asr_client.transcribe_audio(
+                        audio.get("audio_path", ""),
+                        config.newapi.asr_model,
+                    )
+                except NewApiError as exc:
+                    manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+                    manifest.risk_flags.append("asr_failed")
+                    store.save_manifest(state.run_id, manifest)
+                    write_json(
+                        path,
+                        {
+                            "status": "failed",
+                            "reason_code": exc.code,
+                            "returncode": exc.status_code,
+                            "summary": exc.safe_summary,
+                            "audio_path": audio.get("audio_path", ""),
+                            "model": config.newapi.asr_model,
+                            "items": [],
+                        },
+                    )
+                else:
+                    result["audio_path"] = str(audio.get("audio_path", result.get("audio_path", "")))
+                    result["model"] = config.newapi.asr_model
+                    write_json(path, result)
     state.artifacts["asr"] = str(path)
 
 
@@ -400,14 +476,54 @@ def _write_evidence_timeline(store: RunStore, state: RunState) -> None:
     path = store.evidence_timeline_path(state.run_id)
     if not path.exists():
         manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        asr_path = store.run_path(state.run_id) / "asr.json"
+        asr_items = asr_evidence_items(read_json(asr_path)) if asr_path.exists() else []
         timeline = EvidenceTimeline(
             video_duration_sec=manifest.duration_sec,
-            frame_budget=0,
-            sampling_strategy="not_started",
-            items=[],
+            frame_budget=len(read_frame_index(store, state.run_id)),
+            sampling_strategy="ffmpeg_interval_10s",
+            items=asr_items,
         )
         store.save_evidence_timeline(state.run_id, timeline)
     state.artifacts["evidence_timeline"] = str(path)
+
+
+def asr_evidence_items(asr: dict[str, Any]) -> list[EvidenceItem]:
+    if asr.get("status") != "transcribed":
+        return []
+
+    items: list[EvidenceItem] = []
+    segments = asr.get("segments", [])
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text", "")).strip()
+            if not text:
+                continue
+            start = segment.get("start", 0)
+            items.append(
+                EvidenceItem(
+                    timestamp=seconds_to_timestamp(int(float(start))),
+                    type="asr",
+                    claim=text,
+                    raw_excerpt=text,
+                    confidence=0.7,
+                )
+            )
+
+    text = str(asr.get("text", "")).strip()
+    if not items and text:
+        items.append(
+            EvidenceItem(
+                timestamp="00:00:00",
+                type="asr",
+                claim=text,
+                raw_excerpt=text,
+                confidence=0.6,
+            )
+        )
+    return items
 
 
 def _write_distillation(store: RunStore, state: RunState) -> None:
@@ -484,7 +600,7 @@ def _run_package_stage(
         state.failure_reason = f"media extraction failed: {reason_code}"
     else:
         state.failure_reason = (
-            "insufficient evidence: media, ASR, and vision stages are not implemented yet"
+            "insufficient evidence: vision/OCR and distillation stages are not implemented yet"
         )
     state.artifacts["candidate_out_dir"] = str(Path(out_dir))
     _mark_completed(store, state, "package")
