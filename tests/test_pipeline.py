@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from skill_gather.adapters.bilibili import build_initial_manifest
 from skill_gather.config import parse_config
@@ -122,7 +123,208 @@ class FakeAsrClient:
         }
 
 
+class FakeVisionClient:
+    def __init__(self, error: Exception | None = None, fail_on_call: int | None = None):
+        self.error = error
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def analyze_frame(self, frame_file, model):
+        self.calls += 1
+        if self.error is not None and (self.fail_on_call is None or self.calls == self.fail_on_call):
+            raise self.error
+        return {
+            "status": "analyzed",
+            "model": model,
+            "frame_path": str(frame_file),
+            "observations": [
+                {
+                    "type": "frame_ocr",
+                    "claim": "The frame shows a pip install command.",
+                    "raw_excerpt": "python -m pip install -e .",
+                    "confidence": 0.93,
+                }
+            ],
+            "returncode": 0,
+        }
+
+
 class PipelineTests(unittest.TestCase):
+    def test_run_video_pipeline_writes_successful_vision_ocr_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+            )
+
+            vision = read_json(store.run_path(result.run_id) / "vision_ocr.json")
+            self.assertEqual(vision["status"], "analyzed")
+            self.assertEqual(vision["model"], "vision")
+            self.assertEqual(len(vision["items"]), 2)
+            self.assertEqual(vision["items"][0]["timestamp"], "00:00:00")
+            self.assertEqual(vision["items"][0]["observations"][0]["type"], "frame_ocr")
+            self.assertEqual(vision["errors"], [])
+
+    def test_run_video_pipeline_keeps_partial_vision_failures_auditable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(
+                    NewApiError(
+                        "vision failed https://example.test/tmp token=x",
+                        code="vision_failed",
+                        status_code=500,
+                    ),
+                    fail_on_call=1,
+                ),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            vision = read_json(run_dir / "vision_ocr.json")
+            saved_manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(vision["status"], "partial")
+            self.assertEqual(len(vision["items"]), 1)
+            self.assertEqual(len(vision["errors"]), 1)
+            self.assertEqual(vision["errors"][0]["reason_code"], "vision_failed")
+            self.assertEqual(vision["errors"][0]["returncode"], 500)
+            self.assertIn("[redacted-url]", vision["errors"][0]["summary"])
+            self.assertNotIn("token=x", vision["errors"][0]["summary"])
+            self.assertIn("vision_ocr_partial", saved_manifest["risk_flags"])
+
+    def test_run_video_pipeline_skips_vision_when_api_key_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            with patch.dict(os.environ, {}, clear=True):
+                result = run_video_pipeline(
+                    config=config,
+                    store=store,
+                    state=state,
+                    manifest=manifest,
+                    out_dir=Path(temp_dir) / "skills",
+                    metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                    media_downloader=FakeMediaDownloader(),
+                    media_processor=FakeMediaProcessor(),
+                    asr_client=FakeAsrClient(),
+                )
+
+            run_dir = store.run_path(result.run_id)
+            vision = read_json(run_dir / "vision_ocr.json")
+            saved_manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(vision["status"], "skipped")
+            self.assertEqual(vision["reason"], "newapi API key is not configured")
+            self.assertEqual(vision["model"], "vision")
+            self.assertIn("vision_ocr_skipped", saved_manifest["risk_flags"])
+
+    def test_run_video_pipeline_does_not_overwrite_existing_vision_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            run_dir = store.run_path(state.run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                run_dir / "vision_ocr.json",
+                {
+                    "status": "analyzed",
+                    "model": "previous-vision",
+                    "items": [{"timestamp": "00:00:00", "observations": []}],
+                    "errors": [],
+                },
+            )
+            vision_client = FakeVisionClient()
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=vision_client,
+            )
+
+            vision = read_json(store.run_path(result.run_id) / "vision_ocr.json")
+            self.assertEqual(vision["model"], "previous-vision")
+            self.assertEqual(vision_client.calls, 0)
+
+    def test_run_video_pipeline_merges_asr_and_visual_evidence_timeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+            )
+
+            timeline = read_json(store.evidence_timeline_path(result.run_id))
+            self.assertEqual([item["timestamp"] for item in timeline["items"]], ["00:00:00", "00:00:10", "00:00:10"])
+            self.assertEqual(timeline["items"][0]["type"], "frame_ocr")
+            self.assertEqual(timeline["items"][0]["claim"], "The frame shows a pip install command.")
+            self.assertEqual(timeline["items"][1]["type"], "asr")
+            self.assertEqual(timeline["items"][2]["raw_excerpt"], "python -m pip install -e .")
+            distillation = read_json(store.run_path(result.run_id) / "distillation.json")
+            self.assertEqual(distillation["reason"], "RIA++ distillation is not implemented yet")
+
     def test_run_video_pipeline_writes_failure_audit_chain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"

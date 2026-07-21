@@ -18,3 +18,12 @@
 - 安装方式。
 - 是否需要本地 patch。
 - 由哪个模块调用。
+
+## newapi 兼容契约
+
+本仓库不提交 API key、请求媒体、模型输出或运行日志。`skill_gather.integrations.newapi.NewApiClient` 只通过用户配置的 `base_url` 和环境变量 API key 调用 OpenAI-compatible newapi 端点：
+
+- ASR：`POST {base_url}/audio/transcriptions`，multipart form-data，字段 `model` 和文件字段 `file`。
+- 视觉/OCR：`POST {base_url}/chat/completions`，JSON body，使用 `messages[].content` 的 text + `image_url` 多模态格式，图片以 `data:{mime};base64,...` 传入，并请求 `response_format: {"type": "json_object"}`。
+
+视觉/OCR 响应要求 `choices[0].message.content` 是 JSON 字符串，解析后必须包含 `observations` 数组；每个 observation 至少包含非空 `type` 和 `claim`，可选 `raw_excerpt` 与 `confidence`。HTTP、连接和响应形状错误会转换为脱敏后的 `NewApiError`，供管线逐帧记录到审计产物。

@@ -2,7 +2,7 @@
 
 本项目是一个自用的本地 CLI 原型，用于从 B站公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包。
 
-当前初始化版本只提供项目骨架、CLI 入口、核心数据结构、配置读取、来源识别、run 状态保存和评分/复核命令外壳。真实视频下载、抽帧、ASR/OCR、newapi 调用和 skill 蒸馏会在后续阶段实现。
+当前版本提供项目骨架、CLI 入口、核心数据结构、配置读取、来源识别、run 状态保存、yt-dlp/ffmpeg 薄包装、newapi ASR 与视觉/OCR 调用、`vision_ocr.json` 生成，以及 ASR + 视觉证据合并到 `EvidenceTimeline` 的最小管线。RIA++ skill 蒸馏、LLM judge 和成功候选包生成仍在后续阶段实现；证据不足时会保留失败审计包。
 
 ## 项目规范
 

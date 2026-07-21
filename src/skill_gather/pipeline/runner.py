@@ -60,6 +60,11 @@ class AsrClient(Protocol):
         ...
 
 
+class VisionClient(Protocol):
+    def analyze_frame(self, frame_file: str | Path, model: str) -> dict[str, Any]:
+        ...
+
+
 def run_video_pipeline(
     *,
     config: AppConfig,
@@ -71,6 +76,7 @@ def run_video_pipeline(
     media_downloader: MediaDownloader | None = None,
     media_processor: MediaProcessor | None = None,
     asr_client: AsrClient | None = None,
+    vision_client: VisionClient | None = None,
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
@@ -82,7 +88,9 @@ def run_video_pipeline(
     probe = metadata_probe or YtDlpClient()
     downloader = media_downloader or YtDlpClient()
     processor = media_processor or FfmpegClient()
-    asr = asr_client or NewApiClient.from_config(config.newapi)
+    newapi = NewApiClient.from_config(config.newapi)
+    asr = asr_client or newapi
+    vision = vision_client or newapi
     _run_regular_stage(
         store,
         state,
@@ -107,7 +115,12 @@ def run_video_pipeline(
         "asr",
         lambda: _write_asr_result(store, state, config, asr),
     )
-    _run_regular_stage(store, state, "vision_ocr", lambda: _write_vision_result(store, state))
+    _run_regular_stage(
+        store,
+        state,
+        "vision_ocr",
+        lambda: _write_vision_result(store, state, config, vision),
+    )
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
     _run_regular_stage(store, state, "distill", lambda: _write_distillation(store, state))
     _run_regular_stage(store, state, "score", lambda: _write_score(store, state))
@@ -179,6 +192,13 @@ def _probe_manifest(
 
 def _without_flag(flags: list[str], flag: str) -> list[str]:
     return [value for value in flags if value != flag]
+
+
+def _append_manifest_risk(store: RunStore, state: RunState, flag: str) -> None:
+    manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+    if flag not in manifest.risk_flags:
+        manifest.risk_flags.append(flag)
+    store.save_manifest(state.run_id, manifest)
 
 
 def _write_media_probe(
@@ -458,17 +478,80 @@ def _write_asr_result(
     state.artifacts["asr"] = str(path)
 
 
-def _write_vision_result(store: RunStore, state: RunState) -> None:
+def _write_vision_result(
+    store: RunStore,
+    state: RunState,
+    config: AppConfig,
+    vision_client: VisionClient | None,
+) -> None:
     path = store.run_path(state.run_id) / "vision_ocr.json"
     if not path.exists():
-        write_json(
-            path,
-            {
-                "status": "skipped",
-                "reason": "vision/OCR integration is not implemented yet",
-                "items": [],
-            },
-        )
+        frames = read_frame_index(store, state.run_id)
+        if not frames:
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": "no frame index is available",
+                    "items": [],
+                    "errors": [],
+                },
+            )
+        elif vision_client is None:
+            _append_manifest_risk(store, state, "vision_ocr_skipped")
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": "newapi API key is not configured",
+                    "requires": ["newapi"],
+                    "model": config.newapi.vision_model,
+                    "items": [],
+                    "errors": [],
+                },
+            )
+        else:
+            items: list[dict[str, Any]] = []
+            errors: list[dict[str, Any]] = []
+            for frame in frames:
+                try:
+                    result = vision_client.analyze_frame(frame.frame_path, config.newapi.vision_model)
+                except NewApiError as exc:
+                    errors.append(
+                        {
+                            "timestamp": frame.timestamp,
+                            "frame_path": frame.frame_path,
+                            "reason_code": exc.code,
+                            "returncode": exc.status_code,
+                            "summary": exc.safe_summary,
+                        }
+                    )
+                else:
+                    items.append(
+                        {
+                            "timestamp": frame.timestamp,
+                            "frame_path": frame.frame_path,
+                            "status": result.get("status", "analyzed"),
+                            "model": config.newapi.vision_model,
+                            "observations": result.get("observations", []),
+                        }
+                    )
+            status = "analyzed"
+            if errors and items:
+                status = "partial"
+                _append_manifest_risk(store, state, "vision_ocr_partial")
+            elif errors:
+                status = "failed"
+                _append_manifest_risk(store, state, "vision_ocr_failed")
+            write_json(
+                path,
+                {
+                    "status": status,
+                    "model": config.newapi.vision_model,
+                    "items": items,
+                    "errors": errors,
+                },
+            )
     state.artifacts["vision_ocr"] = str(path)
 
 
@@ -478,11 +561,14 @@ def _write_evidence_timeline(store: RunStore, state: RunState) -> None:
         manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
         asr_path = store.run_path(state.run_id) / "asr.json"
         asr_items = asr_evidence_items(read_json(asr_path)) if asr_path.exists() else []
+        vision_path = store.run_path(state.run_id) / "vision_ocr.json"
+        vision_items = vision_evidence_items(read_json(vision_path)) if vision_path.exists() else []
+        items = sorted([*asr_items, *vision_items], key=lambda item: item.timestamp)
         timeline = EvidenceTimeline(
             video_duration_sec=manifest.duration_sec,
             frame_budget=len(read_frame_index(store, state.run_id)),
             sampling_strategy="ffmpeg_interval_10s",
-            items=asr_items,
+            items=items,
         )
         store.save_evidence_timeline(state.run_id, timeline)
     state.artifacts["evidence_timeline"] = str(path)
@@ -526,6 +612,46 @@ def asr_evidence_items(asr: dict[str, Any]) -> list[EvidenceItem]:
     return items
 
 
+def vision_evidence_items(vision: dict[str, Any]) -> list[EvidenceItem]:
+    if vision.get("status") not in {"analyzed", "partial"}:
+        return []
+
+    items: list[EvidenceItem] = []
+    frames = vision.get("items", [])
+    if not isinstance(frames, list):
+        return items
+
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        timestamp = str(frame.get("timestamp", "00:00:00"))
+        observations = frame.get("observations", [])
+        if not isinstance(observations, list):
+            continue
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            claim = str(observation.get("claim", "")).strip()
+            evidence_type = str(observation.get("type", "")).strip()
+            if not claim or not evidence_type:
+                continue
+            confidence = observation.get("confidence", 0.0)
+            try:
+                confidence_value = float(confidence)
+            except (TypeError, ValueError):
+                confidence_value = 0.0
+            items.append(
+                EvidenceItem(
+                    timestamp=timestamp,
+                    type=evidence_type,
+                    claim=claim,
+                    raw_excerpt=str(observation.get("raw_excerpt", "")),
+                    confidence=confidence_value,
+                )
+            )
+    return items
+
+
 def _write_distillation(store: RunStore, state: RunState) -> None:
     path = store.run_path(state.run_id) / "distillation.json"
     if not path.exists():
@@ -533,7 +659,7 @@ def _write_distillation(store: RunStore, state: RunState) -> None:
             path,
             {
                 "status": "skipped",
-                "reason": "no evidence items are available for RIA++ distillation",
+                "reason": "RIA++ distillation is not implemented yet",
                 "candidate_title": "",
             },
         )
@@ -600,7 +726,7 @@ def _run_package_stage(
         state.failure_reason = f"media extraction failed: {reason_code}"
     else:
         state.failure_reason = (
-            "insufficient evidence: vision/OCR and distillation stages are not implemented yet"
+            "insufficient evidence: RIA++ distillation and successful candidate packaging are not implemented yet"
         )
     state.artifacts["candidate_out_dir"] = str(Path(out_dir))
     _mark_completed(store, state, "package")
