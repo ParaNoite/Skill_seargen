@@ -6,8 +6,9 @@
 |---|---|---|---|---|---|---|---|
 | yt-dlp | B站元数据和媒体流采集 | external-command | https://github.com/yt-dlp/yt-dlp | 待固定 | Unlicense | 否 | 由 `integrations/` 薄包装调用 |
 | FFmpeg | 抽音频、抽帧、转码 | external-command | https://github.com/FFmpeg/FFmpeg | 待固定 | LGPL/GPL 取决于构建 | 否 | 运行时检测系统命令 |
+| faster-whisper | 本地必需 ASR 转写后端 | python-dependency | https://github.com/SYSTRAN/faster-whisper | `>=1.1,<2` | MIT | 否 | 通过项目依赖安装；模型权重不入仓 |
 | PySceneDetect | 场景变化检测 | python-dependency / external-tool | https://github.com/Breakthrough/PySceneDetect | 待固定 | BSD-3-Clause | 否 | 后续进入 `pyproject.toml` |
-| newapi | 云端视觉、ASR、蒸馏和 judge | external-service | https://api.renice.cc/ | 配置文件指定 | 服务侧 | 否 | API key 只从环境变量读取 |
+| newapi | 云端视觉、蒸馏和 judge | external-service | https://api.renice.cc/ | 配置文件指定 | 服务侧 | 否 | API key 只从环境变量读取 |
 | kangarooking/cangjie-skill | RIA++ skill 蒸馏参考 | reference-only | 待补充 | 待确认 | 待确认 | 否 | 许可证确认前只参考，不复制 |
 
 新增第三方前必须补齐：
@@ -23,7 +24,7 @@
 
 本仓库不提交 API key、请求媒体、模型输出或运行日志。`skill_gather.integrations.newapi.NewApiClient` 只通过用户配置的 `base_url` 和环境变量 API key 调用 OpenAI-compatible newapi 端点：
 
-- ASR：`POST {base_url}/audio/transcriptions`，multipart form-data，字段 `model` 和文件字段 `file`。
+- ASR 不再走 newapi；v0.1 必须通过本地 faster-whisper 完成口播转写。
 - 视觉/OCR：`POST {base_url}/chat/completions`，JSON body，使用 `messages[].content` 的 text + `image_url` 多模态格式，图片以 `data:{mime};base64,...` 传入，并请求 `response_format: {"type": "json_object"}`。
 - RIA++ 草案蒸馏：`POST {base_url}/chat/completions`，JSON body，将 `VideoSourceManifest` 和 `EvidenceTimeline` 作为文本证据传入，并请求 `response_format: {"type": "json_object"}`。
 - LLM judge：`POST {base_url}/chat/completions`，JSON body，将 `VideoSourceManifest`、`EvidenceTimeline` 和 `distillation.json` 草案作为文本证据传入，并请求 `response_format: {"type": "json_object"}`。

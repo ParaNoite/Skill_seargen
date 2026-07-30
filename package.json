@@ -1,0 +1,11 @@
+{
+  "name": "video-skill-gather",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "scripts\\dev.cmd",
+    "web": "scripts\\start-web.cmd",
+    "test": ".\\.venv\\Scripts\\python.exe -m unittest discover -s tests",
+    "cli": ".\\.venv\\Scripts\\python.exe -m skill_gather --help"
+  }
+}

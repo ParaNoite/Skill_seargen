@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol
 
 from ..adapters.bilibili import manifest_from_yt_dlp_metadata
 from ..config import AppConfig
 from ..integrations import (
+    FasterWhisperClient,
     FfmpegClient,
     FfmpegError,
     NewApiClient,
@@ -27,7 +31,7 @@ from ..models import (
 )
 from ..packaging import write_audit_package, write_candidate_package
 from ..runs import RunStore, read_json, write_json
-from ..scoring import conservative_score, has_single_channel_evidence, rule_score_for_distillation
+from ..scoring import conservative_score, has_single_channel_evidence, normalize_judge_difficulty, rule_score_for_distillation
 from ..source import SourceInfo
 
 
@@ -100,19 +104,21 @@ def run_video_pipeline(
     vision_client: VisionClient | None = None,
     distiller_client: DistillerClient | None = None,
     judge_client: JudgeClient | None = None,
+    judge_difficulty: str = "standard",
 ) -> RunState:
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
 
     state.status = "running"
     state.failure_reason = None
+    state.judge_difficulty = normalize_judge_difficulty(judge_difficulty)
     store.save(state)
 
     probe = metadata_probe or YtDlpClient()
     downloader = media_downloader or YtDlpClient()
     processor = media_processor or FfmpegClient()
     newapi = NewApiClient.from_config(config.newapi)
-    asr = asr_client or newapi
+    asr = asr_client or _default_asr_client(config, newapi)
     vision = vision_client or newapi
     distiller = distiller_client or newapi
     judge = judge_client or newapi
@@ -153,9 +159,13 @@ def run_video_pipeline(
         "distill",
         lambda: _write_distillation(store, state, config, distiller),
     )
-    _run_regular_stage(store, state, "score", lambda: _write_score(store, state, config, judge))
+    _run_regular_stage(store, state, "score", lambda: _write_score(store, state, config, judge, state.judge_difficulty))
     _run_package_stage(config, store, state, manifest, out_dir)
     return state
+
+
+def _default_asr_client(config: AppConfig, newapi: NewApiClient | None) -> AsrClient | None:
+    return FasterWhisperClient.from_model(config.newapi.asr_model)
 
 
 def _run_regular_stage(
@@ -169,8 +179,78 @@ def _run_regular_stage(
 
     state.current_stage = stage
     store.save(state)
-    action()
-    _mark_completed(store, state, stage)
+    with _stage_timer(store, state, stage):
+        action()
+        _mark_completed(store, state, stage)
+
+
+@contextmanager
+def _stage_timer(store: RunStore, state: RunState, stage: str):
+    started_at = datetime.now(UTC)
+    started = perf_counter()
+    try:
+        yield
+    except Exception as exc:
+        _write_stage_timing(
+            store,
+            state,
+            stage,
+            started_at=started_at,
+            started=started,
+            status="error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    else:
+        _write_stage_timing(
+            store,
+            state,
+            stage,
+            started_at=started_at,
+            started=started,
+            status="completed",
+        )
+
+
+def _write_stage_timing(
+    store: RunStore,
+    state: RunState,
+    stage: str,
+    *,
+    started_at: datetime,
+    started: float,
+    status: str,
+    error_type: str = "",
+) -> None:
+    finished_at = datetime.now(UTC)
+    path = store.run_path(state.run_id) / "stage_timings.json"
+    if path.exists():
+        payload = read_json(path)
+    else:
+        payload = {"run_id": state.run_id, "stages": []}
+
+    existing = payload.get("stages", [])
+    stages = [item for item in existing if isinstance(item, dict) and item.get("stage") != stage]
+    record = {
+        "stage": stage,
+        "status": status,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_ms": round((perf_counter() - started) * 1000, 3),
+    }
+    if error_type:
+        record["error_type"] = error_type
+    stages.append(record)
+    order = {name: index for index, name in enumerate(PIPELINE_STAGES)}
+    stages.sort(key=lambda item: order.get(str(item.get("stage", "")), len(order)))
+    payload = {
+        "run_id": state.run_id,
+        "stages": stages,
+        "total_duration_ms": round(sum(float(item.get("duration_ms", 0)) for item in stages), 3),
+    }
+    write_json(path, payload)
+    state.artifacts["stage_timings"] = str(path)
+    store.save(state)
 
 
 def _mark_completed(store: RunStore, state: RunState, stage: str) -> None:
@@ -471,9 +551,10 @@ def _write_asr_result(
                 write_json(
                     path,
                     {
-                        "status": "skipped",
-                        "reason": "newapi API key is not configured",
-                        "requires": ["newapi"],
+                        "status": "failed",
+                        "reason_code": "local_asr_unavailable",
+                        "summary": "local faster-whisper ASR client is not available",
+                        "requires": ["faster-whisper"],
                         "model": config.newapi.asr_model,
                         "audio_path": audio.get("audio_path", ""),
                         "items": [],
@@ -543,7 +624,12 @@ def _write_vision_result(
         else:
             items: list[dict[str, Any]] = []
             errors: list[dict[str, Any]] = []
-            for frame in frames:
+            original_frame_count = len(frames)
+            frame_limit = _vision_frame_limit()
+            selected_frames = frames[:frame_limit] if frame_limit is not None else frames
+            if frame_limit is not None and original_frame_count > len(selected_frames):
+                _append_manifest_risk(store, state, "vision_frame_limit_applied")
+            for frame in selected_frames:
                 try:
                     result = vision_client.analyze_frame(frame.frame_path, config.newapi.vision_model)
                 except NewApiError as exc:
@@ -578,11 +664,24 @@ def _write_vision_result(
                 {
                     "status": status,
                     "model": config.newapi.vision_model,
+                    "frame_count": original_frame_count,
+                    "analyzed_frame_count": len(selected_frames),
                     "items": items,
                     "errors": errors,
                 },
             )
     state.artifacts["vision_ocr"] = str(path)
+
+
+def _vision_frame_limit() -> int | None:
+    raw = os.getenv("SKILL_GATHER_VISION_FRAME_LIMIT", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _write_evidence_timeline(store: RunStore, state: RunState) -> None:
@@ -593,7 +692,8 @@ def _write_evidence_timeline(store: RunStore, state: RunState) -> None:
         asr_items = asr_evidence_items(read_json(asr_path)) if asr_path.exists() else []
         vision_path = store.run_path(state.run_id) / "vision_ocr.json"
         vision_items = vision_evidence_items(read_json(vision_path)) if vision_path.exists() else []
-        items = sorted([*asr_items, *vision_items], key=lambda item: item.timestamp)
+        metadata_items = metadata_evidence_items(manifest)
+        items = sorted([*metadata_items, *asr_items, *vision_items], key=lambda item: item.timestamp)
         timeline = EvidenceTimeline(
             video_duration_sec=manifest.duration_sec,
             frame_budget=len(read_frame_index(store, state.run_id)),
@@ -682,6 +782,33 @@ def vision_evidence_items(vision: dict[str, Any]) -> list[EvidenceItem]:
     return items
 
 
+def metadata_evidence_items(manifest: VideoSourceManifest) -> list[EvidenceItem]:
+    items: list[EvidenceItem] = []
+    title = manifest.title.strip()
+    if title:
+        items.append(
+            EvidenceItem(
+                timestamp="00:00:00",
+                type="metadata_title",
+                claim=f"视频标题说明主题：{title}",
+                raw_excerpt=title,
+                confidence=0.45,
+            )
+        )
+    author = manifest.author.strip()
+    if author:
+        items.append(
+            EvidenceItem(
+                timestamp="00:00:00",
+                type="metadata_author",
+                claim=f"视频作者：{author}",
+                raw_excerpt=author,
+                confidence=0.35,
+            )
+        )
+    return items
+
+
 def _write_distillation(
     store: RunStore,
     state: RunState,
@@ -744,6 +871,7 @@ def _write_score(
     state: RunState,
     config: AppConfig,
     judge_client: JudgeClient | None,
+    judge_difficulty: str = "standard",
 ) -> None:
     path = store.run_path(state.run_id) / "score.json"
     if not path.exists():
@@ -759,6 +887,13 @@ def _write_score(
                 "status": "skipped",
                 "reason": "distillation did not produce a candidate draft",
             }
+        elif judge_difficulty == "off":
+            judge_score = rule_score
+            judge_record = {
+                "status": "disabled",
+                "reason": "LLM judge was disabled for this run",
+                "model": config.newapi.judge_model,
+            }
         elif judge_client is None:
             _append_manifest_risk(store, state, "judge_skipped")
             judge_score = 0
@@ -770,12 +905,23 @@ def _write_score(
             }
         else:
             try:
-                judge_record = judge_client.judge_skill(
-                    distillation,
-                    timeline.to_dict(),
-                    manifest.to_dict(),
-                    config.newapi.judge_model,
-                )
+                try:
+                    judge_record = judge_client.judge_skill(
+                        distillation,
+                        timeline.to_dict(),
+                        manifest.to_dict(),
+                        config.newapi.judge_model,
+                        difficulty=judge_difficulty,
+                    )
+                except TypeError as exc:
+                    if "difficulty" not in str(exc):
+                        raise
+                    judge_record = judge_client.judge_skill(
+                        distillation,
+                        timeline.to_dict(),
+                        manifest.to_dict(),
+                        config.newapi.judge_model,
+                    )
             except NewApiError as exc:
                 _append_manifest_risk(store, state, "judge_failed")
                 judge_score = 0
@@ -792,12 +938,23 @@ def _write_score(
                 for flag in judge_record.get("risk_flags", []):
                     if str(flag) == "single_channel_evidence":
                         single_channel = True
-        score = conservative_score(
-            rule_score=rule_score,
-            llm_judge_score=judge_score,
-            single_channel_evidence=single_channel,
-        )
+        if judge_difficulty == "off" and distillation.get("status") == "distilled":
+            score = ScoreResult(
+                rule_score=rule_score,
+                llm_judge_score=judge_score,
+                final_score=rule_score,
+                final_status="needs_review",
+                conflict_policy="judge_disabled",
+            )
+        else:
+            score = conservative_score(
+                rule_score=rule_score,
+                llm_judge_score=judge_score,
+                single_channel_evidence=single_channel,
+                difficulty=judge_difficulty,
+            )
         payload = score.to_dict()
+        payload["judge_difficulty"] = judge_difficulty
         payload["judge"] = judge_record
         payload["single_channel_evidence"] = single_channel
         write_json(path, payload)
@@ -814,88 +971,89 @@ def _run_package_stage(
     if "package" in state.completed_stages:
         return
 
-    state.current_stage = "package"
-    manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
-    score = ScoreResult.from_dict(read_json(store.run_path(state.run_id) / "score.json"))
-    timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
-    risk_flags = list(manifest.risk_flags)
-    if score.final_status == "failed":
-        risk_flags.append("insufficient_evidence")
-    metadata = SkillPackageMetadata(
-        source=manifest.source,
-        source_id=manifest.source_id,
-        source_url=manifest.url,
-        title=manifest.title,
-        author=manifest.author,
-        generated_at=datetime.now(UTC).isoformat(),
-        package_status=score.final_status,
-        models={
-            "vision": config.newapi.vision_model,
-            "asr": config.newapi.asr_model,
-            "distiller": config.newapi.distiller_model,
-            "judge": config.newapi.judge_model,
-        },
-        evidence=timeline.items,
-        risk_flags=risk_flags,
-        scores=score,
-    )
-    write_json(store.run_path(state.run_id) / "metadata.json", metadata.to_dict())
+    with _stage_timer(store, state, "package"):
+        state.current_stage = "package"
+        manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        score = ScoreResult.from_dict(read_json(store.run_path(state.run_id) / "score.json"))
+        timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
+        risk_flags = list(manifest.risk_flags)
+        if score.final_status == "failed":
+            risk_flags.append("insufficient_evidence")
+        metadata = SkillPackageMetadata(
+            source=manifest.source,
+            source_id=manifest.source_id,
+            source_url=manifest.url,
+            title=manifest.title,
+            author=manifest.author,
+            generated_at=datetime.now(UTC).isoformat(),
+            package_status=score.final_status,
+            models={
+                "vision": config.newapi.vision_model,
+                "asr": config.newapi.asr_model,
+                "distiller": config.newapi.distiller_model,
+                "judge": config.newapi.judge_model,
+            },
+            evidence=timeline.items,
+            risk_flags=risk_flags,
+            scores=score,
+        )
+        write_json(store.run_path(state.run_id) / "metadata.json", metadata.to_dict())
 
-    if score.final_status in {"passed", "needs_review"}:
-        state.status = "completed"
-        state.failure_reason = None
+        if score.final_status in {"passed", "needs_review"}:
+            state.status = "completed"
+            state.failure_reason = None
+            state.artifacts["candidate_out_dir"] = str(Path(out_dir))
+            _mark_completed(store, state, "package")
+            distillation = read_json(store.run_path(state.run_id) / "distillation.json")
+            package_path = write_candidate_package(
+                out_dir,
+                metadata,
+                distillation,
+                evidence_timeline=timeline,
+            )
+            state.artifacts["package"] = str(package_path)
+            store.save(state)
+            return
+
+        state.status = "failed"
+        media_probe_path = store.run_path(state.run_id) / "media_probe.json"
+        if media_probe_path.exists():
+            media_probe = read_json(media_probe_path)
+        else:
+            media_probe = {}
+        media_extract_path = store.run_path(state.run_id) / "media_extract.json"
+        if media_extract_path.exists():
+            media_extract = read_json(media_extract_path)
+        else:
+            media_extract = {}
+        if media_probe.get("status") == "failed":
+            reason_code = media_probe.get("reason_code", "metadata_probe_failed")
+            state.failure_reason = f"metadata probe failed: {reason_code}"
+        elif media_extract.get("status") == "failed":
+            reason_code = media_extract.get("reason_code", "media_download_failed")
+            state.failure_reason = f"media extraction failed: {reason_code}"
+        else:
+            score_record = read_json(store.run_path(state.run_id) / "score.json")
+            judge_record = score_record.get("judge", {}) if isinstance(score_record, dict) else {}
+            if isinstance(judge_record, dict) and judge_record.get("status") == "skipped":
+                state.failure_reason = f"insufficient evidence: {judge_record.get('reason', 'judge skipped')}"
+            elif isinstance(judge_record, dict) and judge_record.get("status") == "failed":
+                state.failure_reason = f"insufficient evidence: judge failed: {judge_record.get('reason_code', 'judge_failed')}"
+            else:
+                state.failure_reason = "insufficient evidence: final score is below the candidate threshold"
         state.artifacts["candidate_out_dir"] = str(Path(out_dir))
         _mark_completed(store, state, "package")
-        distillation = read_json(store.run_path(state.run_id) / "distillation.json")
-        package_path = write_candidate_package(
-            out_dir,
+        frame_index = read_frame_index(store, state.run_id)
+        package_path = write_audit_package(
+            store.run_path(state.run_id),
             metadata,
-            distillation,
+            run_state=state,
             evidence_timeline=timeline,
+            frame_index=frame_index,
+            failure_reason=state.failure_reason,
         )
         state.artifacts["package"] = str(package_path)
         store.save(state)
-        return
-
-    state.status = "failed"
-    media_probe_path = store.run_path(state.run_id) / "media_probe.json"
-    if media_probe_path.exists():
-        media_probe = read_json(media_probe_path)
-    else:
-        media_probe = {}
-    media_extract_path = store.run_path(state.run_id) / "media_extract.json"
-    if media_extract_path.exists():
-        media_extract = read_json(media_extract_path)
-    else:
-        media_extract = {}
-    if media_probe.get("status") == "failed":
-        reason_code = media_probe.get("reason_code", "metadata_probe_failed")
-        state.failure_reason = f"metadata probe failed: {reason_code}"
-    elif media_extract.get("status") == "failed":
-        reason_code = media_extract.get("reason_code", "media_download_failed")
-        state.failure_reason = f"media extraction failed: {reason_code}"
-    else:
-        score_record = read_json(store.run_path(state.run_id) / "score.json")
-        judge_record = score_record.get("judge", {}) if isinstance(score_record, dict) else {}
-        if isinstance(judge_record, dict) and judge_record.get("status") == "skipped":
-            state.failure_reason = f"insufficient evidence: {judge_record.get('reason', 'judge skipped')}"
-        elif isinstance(judge_record, dict) and judge_record.get("status") == "failed":
-            state.failure_reason = f"insufficient evidence: judge failed: {judge_record.get('reason_code', 'judge_failed')}"
-        else:
-            state.failure_reason = "insufficient evidence: final score is below the candidate threshold"
-    state.artifacts["candidate_out_dir"] = str(Path(out_dir))
-    _mark_completed(store, state, "package")
-    frame_index = read_frame_index(store, state.run_id)
-    package_path = write_audit_package(
-        store.run_path(state.run_id),
-        metadata,
-        run_state=state,
-        evidence_timeline=timeline,
-        frame_index=frame_index,
-        failure_reason=state.failure_reason,
-    )
-    state.artifacts["package"] = str(package_path)
-    store.save(state)
 
 
 def read_frame_index(store: RunStore, run_id: str) -> list[FrameManifest]:

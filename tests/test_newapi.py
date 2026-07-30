@@ -42,6 +42,22 @@ class NewApiClientTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(NewApiClient.from_config(config))
 
+    def test_from_config_accepts_literal_api_key_for_local_testing(self):
+        config = NewApiConfig(
+            base_url="https://api.example.test/v1",
+            api_key_env="sk-test-literal-key",
+            vision_model="vision",
+            asr_model="asr",
+            distiller_model="distiller",
+            judge_model="judge",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            client = NewApiClient.from_config(config)
+
+        self.assertIsNotNone(client)
+        self.assertEqual(client.api_key, "sk-test-literal-key")
+
     def test_transcribe_audio_posts_multipart_request(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             audio = Path(temp_dir) / "audio.wav"
@@ -135,6 +151,35 @@ class NewApiClientTests(unittest.TestCase):
             image_part["image_url"]["url"],
             f"data:image/jpeg;base64,{b64encode(b'jpeg-bytes').decode('ascii')}",
         )
+
+    def test_analyze_frame_accepts_markdown_json_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            frame = Path(temp_dir) / "frame.jpg"
+            frame.write_bytes(b"jpeg-bytes")
+            with patch(
+                "skill_gather.integrations.newapi.urllib.request.urlopen",
+                return_value=FakeResponse(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": (
+                                        "```json\n"
+                                        '{"observations":[{"type":"frame_ocr","claim":"menu","raw_excerpt":"menu","confidence":0.8}]}\n'
+                                        "```"
+                                    )
+                                }
+                            }
+                        ]
+                    }
+                ),
+            ):
+                result = NewApiClient(
+                    base_url="https://api.example.test/v1/",
+                    api_key="secret-key",
+                ).analyze_frame(frame, "vision-model")
+
+        self.assertEqual(result["observations"][0]["claim"], "menu")
 
     def test_analyze_frame_reports_missing_file(self):
         with self.assertRaises(NewApiError) as context:
@@ -349,6 +394,140 @@ class NewApiClientTests(unittest.TestCase):
         prompt_text = payload["messages"][0]["content"]
         self.assertIn("Skill Demo", prompt_text)
         self.assertIn("00:00:10", prompt_text)
+
+    def test_distill_skill_compacts_large_evidence_payload(self):
+        evidence = {
+            "items": [
+                {
+                    "timestamp": f"00:00:{index:02d}",
+                    "type": "asr",
+                    "claim": "x" * 500,
+                    "raw_excerpt": "y" * 500,
+                    "confidence": 0.7,
+                }
+                for index in range(4)
+            ]
+        }
+
+        with patch.dict(os.environ, {"SKILL_GATHER_DISTILL_EVIDENCE_LIMIT": "2", "SKILL_GATHER_DISTILL_CLAIM_CHARS": "12"}):
+            with patch(
+                "skill_gather.integrations.newapi.urllib.request.urlopen",
+                return_value=FakeResponse(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "candidate_title": "Compact evidence",
+                                            "summary": "summary",
+                                            "ria": {
+                                                "recall": ["r"],
+                                                "interpret": ["i"],
+                                                "apply": ["a"],
+                                                "boundary": ["b"],
+                                                "test": ["t"],
+                                            },
+                                            "evidence_refs": [],
+                                        }
+                                    )
+                                }
+                            }
+                        ]
+                    }
+                ),
+            ) as urlopen:
+                NewApiClient(
+                    base_url="https://api.example.test/v1/",
+                    api_key="secret-key",
+                ).distill_skill(evidence, {"title": "Demo"}, "distiller-model")
+
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        prompt = body["messages"][0]["content"]
+        self.assertIn('"omitted_item_count": 2', prompt)
+        self.assertNotIn("x" * 500, prompt)
+
+    def test_distill_skill_omits_manifest_risk_flags_from_prompt(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "candidate_title": "Clean prompt",
+                                        "summary": "summary",
+                                        "ria": {
+                                            "recall": ["r"],
+                                            "interpret": ["i"],
+                                            "apply": ["a"],
+                                            "boundary": ["b"],
+                                            "test": ["t"],
+                                        },
+                                        "evidence_refs": [],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ),
+        ) as urlopen:
+            NewApiClient(
+                base_url="https://api.example.test/v1/",
+                api_key="secret-key",
+            ).distill_skill(
+                {"items": [{"timestamp": "00:00:01", "type": "asr", "claim": "step"}]},
+                {"title": "Demo", "risk_flags": ["distillation_failed"]},
+                "distiller-model",
+            )
+
+        request = urlopen.call_args.args[0]
+        prompt = json.loads(request.data.decode("utf-8"))["messages"][0]["content"]
+        self.assertIn("Output only valid JSON", prompt)
+        self.assertNotIn("distillation_failed", prompt)
+
+    def test_distill_skill_normalizes_dict_ria_items(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "candidate_title": "Dict RIA",
+                                        "summary": "summary",
+                                        "ria": {
+                                            "recall": [{"claim": "first", "timestamp": "00:00:01"}],
+                                            "interpret": ["i"],
+                                            "apply": ["a"],
+                                            "boundary": ["b"],
+                                            "test": ["t"],
+                                        },
+                                        "evidence_refs": [],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ),
+        ):
+            result = NewApiClient(
+                base_url="https://api.example.test/v1/",
+                api_key="secret-key",
+            ).distill_skill(
+                {"items": [{"timestamp": "00:00:01", "type": "asr", "claim": "step"}]},
+                {"title": "Demo"},
+                "distiller-model",
+            )
+
+        self.assertEqual(result["ria"]["recall"], ["first — 00:00:01"])
 
     def test_judge_skill_posts_draft_and_returns_score(self):
         with patch(

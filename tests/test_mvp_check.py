@@ -1,6 +1,6 @@
 import unittest
 
-from skill_gather.config import parse_config
+from skill_gather.config import ConfigError, parse_config
 from skill_gather.mvp_check import run_mvp_check
 
 
@@ -10,7 +10,7 @@ CONFIG = {
             "base_url": "https://api.renice.cc/v1",
             "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
-            "asr_model": "asr",
+            "asr_model": "faster-whisper:base",
             "distiller_model": "distiller",
             "judge_model": "judge",
         }
@@ -34,6 +34,20 @@ class MvpCheckTests(unittest.TestCase):
         self.assertIn("failure_report.md", result["checks"]["failure_audit_pipeline"]["artifacts"])
         self.assertTrue(result["checks"]["candidate_pipeline"]["package_dir"])
         self.assertTrue(result["checks"]["failure_audit_pipeline"]["run_dir"])
+
+    def test_config_rejects_disabled_asr_for_mvp_check(self):
+        raw = {
+            **CONFIG,
+            "providers": {
+                "newapi": {
+                    **CONFIG["providers"]["newapi"],
+                    "asr_model": "disabled",
+                }
+            },
+        }
+
+        with self.assertRaises(ConfigError):
+            parse_config(raw)
 
 
 if __name__ == "__main__":

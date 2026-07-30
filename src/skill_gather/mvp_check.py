@@ -68,7 +68,7 @@ def _run_candidate_pipeline_check(config: AppConfig, root: Path) -> dict[str, An
         required_files = ["SKILL.md", "README.md", "metadata.json", "evidence_timeline.json"]
         missing = [name for name in required_files if not (package_dir / name).exists()]
         metadata = read_json(package_dir / "metadata.json") if (package_dir / "metadata.json").exists() else {}
-        if result.status != "completed" or missing or metadata.get("package_status") != "passed":
+        if result.status != "completed" or missing or metadata.get("package_status") not in {"passed", "needs_review"}:
             return {
                 "status": "failed",
                 "run_id": result.run_id,

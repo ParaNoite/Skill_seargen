@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Skill Gather</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">VG</span>
+      <span>Video Skill Gather</span>
+    </div>
+    <div class="top-actions">
+      <span class="local-status"><i></i> 本地运行</span>
+      <button id="check-button" class="button secondary" type="button">运行自检</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="submit-panel" aria-labelledby="submit-title">
+      <div>
+        <p class="eyebrow">新建采集任务</p>
+        <h1 id="submit-title">从视频提炼可复核 Skill</h1>
+      </div>
+      <form id="video-form">
+        <div class="form-fields">
+          <div>
+            <label for="api-key">NewAPI API Key</label>
+            <div class="input-row">
+              <input id="api-key" name="api_key" type="password" placeholder="sk-..." autocomplete="off">
+              <button id="models-button" class="button secondary" type="button">查询模型</button>
+            </div>
+            <div id="models-panel" class="models-panel" hidden></div>
+          </div>
+          <div>
+            <label for="judge-difficulty">Judge 难度</label>
+            <select id="judge-difficulty" name="judge_difficulty">
+              <option value="standard" selected>标准</option>
+              <option value="lenient">宽松</option>
+              <option value="strict">严格</option>
+              <option value="off">关闭 Judge</option>
+            </select>
+          </div>
+          <div>
+            <label for="video-url">B 站公开视频 URL</label>
+            <div class="input-row">
+              <input id="video-url" name="url" type="url" placeholder="https://www.bilibili.com/video/BV..." required autocomplete="url">
+              <button id="submit-button" class="button primary" type="submit">开始处理</button>
+            </div>
+          </div>
+        </div>
+        <p id="form-message" class="form-message" role="status"></p>
+      </form>
+    </section>
+
+    <section class="workspace">
+      <aside class="runs-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Runs</p>
+            <h2>处理记录</h2>
+          </div>
+          <button id="refresh-button" class="icon-button" type="button" aria-label="刷新处理记录" title="刷新">↻</button>
+        </div>
+        <div id="runs-list" class="runs-list" aria-live="polite"></div>
+      </aside>
+
+      <section id="detail-panel" class="detail-panel" aria-live="polite">
+        <div class="empty-state">
+          <span class="empty-icon">◎</span>
+          <h2>选择一条处理记录</h2>
+          <p>状态、评分与证据摘要会显示在这里。</p>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -30,3 +30,4 @@ third_party/*
 *.png
 *.jpg
 *.jpeg
+.hf-cache/

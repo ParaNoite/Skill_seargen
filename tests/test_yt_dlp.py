@@ -21,8 +21,11 @@ class YtDlpClientTests(unittest.TestCase):
         self.assertEqual(result["title"], "Demo")
         run.assert_called_once()
         args = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
         self.assertEqual(args[:3], ["yt-dlp", "--dump-json", "--skip-download"])
         self.assertEqual(args[-1], "https://example.test/video")
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
 
     def test_probe_metadata_reports_missing_binary(self):
         with patch("skill_gather.integrations.yt_dlp.subprocess.run", side_effect=FileNotFoundError):
@@ -73,9 +76,12 @@ class YtDlpClientTests(unittest.TestCase):
         self.assertTrue(result["media_files"][0].endswith("BV1xx411c7mD.mp4"))
         run.assert_called_once()
         args = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
         self.assertIn("--paths", args)
         self.assertIn("--output", args)
         self.assertEqual(args[-1], "https://example.test/video")
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
 
     def test_download_media_reports_sanitized_failure(self):
         completed = Mock(returncode=1, stdout="", stderr="failed https://example.test/tmp cookie=x")

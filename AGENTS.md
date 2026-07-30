@@ -16,8 +16,26 @@
 当前项目是 Python CLI 原型。默认命令：
 
 ```powershell
-$env:PYTHONPATH='src'; python -m unittest discover -s tests
-$env:PYTHONPATH='src'; python -m skill_gather --help
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m skill_gather --help
 ```
+
+faster-whisper 是必需本地 ASR 后端。首次下载/加载模型权重时，如果 Hugging Face 直连超时，使用当前已验证的镜像环境变量：
+
+```powershell
+$env:HF_ENDPOINT="https://hf-mirror.com"
+$env:HF_HUB_DISABLE_XET="1"
+.\.venv\Scripts\python.exe -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8'); print('loaded base')"
+```
+
+临时本地 Web 界面统一入口：
+
+```powershell
+.\scripts\dev.cmd
+npm run dev
+.\scripts\start-web.cmd
+```
+
+`.\scripts\dev.cmd` / `npm run dev` 是本地开发优先入口，会优先使用仓库 `.venv`；`.\scripts\start-web.cmd` 保留为兼容入口。
 
 如果后续加入虚拟环境入口或开发脚本，应先更新本文件，再要求 Agent 使用统一入口。

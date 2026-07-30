@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,17 @@ class RunStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return path
+
+    def delete_run(self, run_id: str) -> None:
+        path = self.run_path(run_id)
+        root = self.root.resolve()
+        target = path.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("无效的 run id") from exc
+        if target.exists():
+            shutil.rmtree(target)
 
 
 def read_json(path: str | Path) -> dict[str, Any]:

@@ -6,10 +6,30 @@ from .models import EvidenceTimeline
 from .models import PackageStatus, ScoreResult
 
 
-def status_for_score(score: int) -> PackageStatus:
-    if score >= 85:
+JUDGE_DIFFICULTIES = {"lenient", "standard", "strict", "off"}
+
+
+def normalize_judge_difficulty(value: str | None) -> str:
+    difficulty = str(value or "standard").strip().lower()
+    if difficulty not in JUDGE_DIFFICULTIES:
+        return "standard"
+    return difficulty
+
+
+def thresholds_for_difficulty(difficulty: str | None) -> tuple[int, int]:
+    difficulty = normalize_judge_difficulty(difficulty)
+    if difficulty == "lenient":
+        return 80, 60
+    if difficulty == "strict":
+        return 90, 78
+    return 85, 70
+
+
+def status_for_score(score: int, *, difficulty: str | None = None) -> PackageStatus:
+    passed_threshold, review_threshold = thresholds_for_difficulty(difficulty)
+    if score >= passed_threshold:
         return "passed"
-    if score >= 70:
+    if score >= review_threshold:
         return "needs_review"
     return "failed"
 
@@ -19,9 +39,10 @@ def conservative_score(
     llm_judge_score: int,
     *,
     single_channel_evidence: bool = False,
+    difficulty: str | None = None,
 ) -> ScoreResult:
     final_score = min(rule_score, llm_judge_score)
-    final_status = status_for_score(final_score)
+    final_status = status_for_score(final_score, difficulty=difficulty)
 
     if single_channel_evidence and final_status == "passed":
         final_status = "needs_review"
@@ -31,6 +52,7 @@ def conservative_score(
         llm_judge_score=llm_judge_score,
         final_score=final_score,
         final_status=final_status,
+        conflict_policy=f"conservative:{normalize_judge_difficulty(difficulty)}",
     )
 
 

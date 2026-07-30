@@ -59,7 +59,121 @@ def _has_model_content(value: Any) -> bool:
         return bool(value.strip())
     if isinstance(value, list):
         return any(_has_model_content(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_model_content(item) for item in value.values())
     return False
+
+
+def _normalize_ria(ria: dict[str, Any]) -> dict[str, Any]:
+    return {key: _normalize_ria_value(ria.get(key)) for key in ["recall", "interpret", "apply", "boundary", "test"]}
+
+
+def _normalize_ria_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_normalize_ria_item(item) for item in value if _normalize_ria_item(item)]
+    if isinstance(value, dict):
+        return _normalize_ria_item(value)
+    return value
+
+
+def _normalize_ria_item(item: Any) -> str:
+    if isinstance(item, dict):
+        parts = [
+            str(item.get("claim", "")).strip(),
+            str(item.get("timestamp", "")).strip(),
+            str(item.get("evidence_ref", "")).strip(),
+        ]
+        text = " — ".join(part for part in parts if part)
+        return text or json.dumps(item, ensure_ascii=False)
+    return str(item).strip()
+
+
+def _json_object_from_content(content: str) -> dict[str, Any]:
+    text = str(content).strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        result = json.loads(text[start : end + 1])
+    if not isinstance(result, dict):
+        raise json.JSONDecodeError("expected JSON object", text, 0)
+    return result
+
+
+def _compact_evidence_timeline(evidence_timeline: dict[str, Any]) -> dict[str, Any]:
+    items = evidence_timeline.get("items", [])
+    if not isinstance(items, list):
+        items = []
+    max_items = _env_int("SKILL_GATHER_DISTILL_EVIDENCE_LIMIT", 90)
+    max_claim_chars = _env_int("SKILL_GATHER_DISTILL_CLAIM_CHARS", 220)
+    compact_items: list[dict[str, Any]] = []
+    for item in items[:max_items]:
+        if not isinstance(item, dict):
+            continue
+        compact_item = {
+            "timestamp": item.get("timestamp", "00:00:00"),
+            "type": item.get("type", ""),
+            "claim": _truncate_text(item.get("claim", ""), max_claim_chars),
+            "raw_excerpt": _truncate_text(item.get("raw_excerpt", ""), max_claim_chars),
+            "confidence": item.get("confidence", 0),
+        }
+        compact_items.append(compact_item)
+    return {
+        "video_duration_sec": evidence_timeline.get("video_duration_sec", 0),
+        "frame_budget": evidence_timeline.get("frame_budget", 0),
+        "sampling_strategy": evidence_timeline.get("sampling_strategy", ""),
+        "items": compact_items,
+        "omitted_item_count": max(0, len(items) - len(compact_items)),
+    }
+
+
+def _compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": manifest.get("source", ""),
+        "source_id": manifest.get("source_id", ""),
+        "title": manifest.get("title", ""),
+        "author": manifest.get("author", ""),
+        "duration_sec": manifest.get("duration_sec", 0),
+        "subtitle_available": manifest.get("subtitle_available", False),
+        "media_access": manifest.get("media_access", ""),
+    }
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    text = str(value).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def resolve_api_key(api_key_env_or_value: str) -> str:
+    value = str(api_key_env_or_value).strip()
+    if not value:
+        return ""
+    env_value = os.getenv(value, "").strip()
+    if env_value:
+        return env_value
+    if value.startswith(("sk-", "sk_")):
+        return value
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +184,7 @@ class NewApiClient:
 
     @classmethod
     def from_config(cls, config: Any) -> "NewApiClient | None":
-        api_key = os.getenv(str(config.api_key_env), "").strip()
+        api_key = resolve_api_key(str(config.api_key_env))
         if not api_key:
             return None
         return cls(base_url=str(config.base_url), api_key=api_key)
@@ -215,9 +329,14 @@ class NewApiClient:
                             {
                                 "type": "text",
                                 "text": (
-                                    "Analyze this video frame for reusable technical evidence. "
-                                    "Return JSON with an observations array. Each observation must "
-                                    "contain type, claim, raw_excerpt, and confidence."
+                                    "Analyze this tutorial video frame as evidence for distilling a reusable Codex skill. "
+                                    "Use a Cangjie-style multi-extractor pass: extract OCR/code/commands/config, "
+                                    "UI actions, workflow steps, examples or counterexamples, toolchain names, "
+                                    "versions, errors, and decision rules visible in the frame. "
+                                    "Return JSON with an observations array. Each observation must contain type, "
+                                    "claim, raw_excerpt, and confidence. Use specific types such as frame_ocr, "
+                                    "code_command, ui_action, workflow_step, example, pitfall, toolchain, or rule. "
+                                    "Do not infer facts that are not visible in the frame."
                                 ),
                             },
                             {
@@ -236,7 +355,7 @@ class NewApiClient:
             unreachable_code="vision_unreachable",
         )
         try:
-            result = json.loads(content)
+            result = _json_object_from_content(content)
         except (TypeError, json.JSONDecodeError) as exc:
             raise NewApiError(
                 "newapi returned invalid JSON for vision analysis",
@@ -271,13 +390,16 @@ class NewApiClient:
         manifest: dict[str, Any],
         model: str,
     ) -> dict[str, Any]:
+        compact_timeline = _compact_evidence_timeline(evidence_timeline)
+        compact_manifest = _compact_manifest(manifest)
         prompt = (
-            "Distill the provided video evidence into a reusable Codex skill draft. "
-            "Return JSON with candidate_title, summary, ria, and evidence_refs. "
-            "The ria object must contain recall, interpret, apply, boundary, and test. "
-            "Do not invent facts beyond the evidence.\n\n"
-            f"Video manifest:\n{json.dumps(manifest, ensure_ascii=False)}\n\n"
-            f"EvidenceTimeline:\n{json.dumps(evidence_timeline, ensure_ascii=False)}"
+            "Output only valid JSON. Create a reusable Chinese skill note from the video evidence. "
+            "JSON keys: candidate_title, summary, ria, evidence_refs. "
+            "ria keys: recall, interpret, apply, boundary, test. "
+            "Each ria value must be a string or an array of short strings. "
+            "Keep claims tied to timestamps and do not add facts absent from the evidence.\n\n"
+            f"Video:\n{json.dumps(compact_manifest, ensure_ascii=False)}\n\n"
+            f"Evidence:\n{json.dumps(compact_timeline, ensure_ascii=False)}"
         )
         content = self._post_chat_completion_content(
             {
@@ -290,7 +412,7 @@ class NewApiClient:
             unreachable_code="distillation_unreachable",
         )
         try:
-            result = json.loads(content)
+            result = _json_object_from_content(content)
         except (TypeError, json.JSONDecodeError) as exc:
             raise NewApiError(
                 "newapi returned invalid JSON for distillation",
@@ -298,6 +420,8 @@ class NewApiClient:
             ) from exc
 
         ria = result.get("ria") if isinstance(result, dict) else None
+        if isinstance(ria, dict):
+            ria = _normalize_ria(ria)
         if (
             not isinstance(result, dict)
             or not str(result.get("candidate_title", "")).strip()
@@ -325,12 +449,29 @@ class NewApiClient:
         evidence_timeline: dict[str, Any],
         manifest: dict[str, Any],
         model: str,
+        *,
+        difficulty: str = "standard",
     ) -> dict[str, Any]:
+        difficulty_instructions = {
+            "lenient": (
+                "Use a lenient bar: accept a useful draft with some missing detail when "
+                "the core workflow is supported, but still penalize fabricated claims."
+            ),
+            "strict": (
+                "Use a strict bar: require strong evidence coverage, executable steps, "
+                "clear boundaries, tests, and cross-channel support; penalize gaps heavily."
+            ),
+            "standard": (
+                "Use the standard bar: balance evidence coverage, executability, boundaries, "
+                "tests, and transferability."
+            ),
+        }
         prompt = (
             "Judge this candidate Codex skill draft against the v0.1 rubric. "
             "Return JSON with score, rationale, and risk_flags. "
             "Score must be an integer from 0 to 100. Penalize unsupported claims, "
-            "weak boundaries, missing tests, and evidence that only comes from one channel.\n\n"
+            "weak boundaries, missing tests, and evidence that only comes from one channel.\n"
+            f"Judge difficulty: {difficulty}. {difficulty_instructions.get(difficulty, difficulty_instructions['standard'])}\n\n"
             f"Video manifest:\n{json.dumps(manifest, ensure_ascii=False)}\n\n"
             f"EvidenceTimeline:\n{json.dumps(evidence_timeline, ensure_ascii=False)}\n\n"
             f"Distillation:\n{json.dumps(distillation, ensure_ascii=False)}"
@@ -346,7 +487,7 @@ class NewApiClient:
             unreachable_code="judge_unreachable",
         )
         try:
-            result = json.loads(content)
+            result = _json_object_from_content(content)
         except (TypeError, json.JSONDecodeError) as exc:
             raise NewApiError(
                 "newapi returned invalid JSON for judge",

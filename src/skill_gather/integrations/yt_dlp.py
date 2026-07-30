@@ -62,6 +62,7 @@ class YtDlpClient:
                 text=True,
                 timeout=self.timeout_sec,
                 encoding="utf-8",
+                errors="replace",
         )
         except FileNotFoundError as exc:
             raise YtDlpError(
@@ -122,6 +123,7 @@ class YtDlpClient:
                 text=True,
                 timeout=self.timeout_sec,
                 encoding="utf-8",
+                errors="replace",
             )
         except FileNotFoundError as exc:
             raise YtDlpError(

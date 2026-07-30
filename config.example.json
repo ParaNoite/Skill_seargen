@@ -3,10 +3,10 @@
     "newapi": {
       "base_url": "https://api.renice.cc/v1",
       "api_key_env": "NEWAPI_API_KEY",
-      "vision_model": "fill-me",
-      "asr_model": "fill-me",
-      "distiller_model": "fill-me",
-      "judge_model": "fill-me"
+      "vision_model": "gpt-4o-mini",
+      "asr_model": "faster-whisper:large-v3-turbo",
+      "distiller_model": "gpt-4o-mini",
+      "judge_model": "gpt-4o-mini"
     }
   },
   "defaults": {

@@ -24,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
     video.add_argument("--config", required=True, help="配置文件路径")
     video.add_argument("--out", default="./skills", help="候选 skill 输出目录")
     video.add_argument("--runs", default="./runs", help="run 状态目录")
+    video.add_argument(
+        "--judge-difficulty",
+        choices=["lenient", "standard", "strict", "off"],
+        default="standard",
+        help="judge 难度；off 表示跳过 LLM judge 并直接生成待复核候选包",
+    )
     video.set_defaults(handler=handle_video)
 
     score = subcommands.add_parser("score", help="读取 skill 包评分")
@@ -43,7 +49,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mvp_check.set_defaults(handler=handle_mvp_check)
 
+    web = subcommands.add_parser("web", help="启动本地 Web 界面")
+    web.add_argument("--config", default="config.json", help="配置文件路径")
+    web.add_argument("--out", default="./skills", help="候选 skill 输出目录")
+    web.add_argument("--runs", default="./runs", help="run 状态目录")
+    web.add_argument("--host", default="127.0.0.1", help="监听地址")
+    web.add_argument("--port", type=int, default=8765, help="监听端口")
+    web.set_defaults(handler=handle_web)
+
     return parser
+
+
+def handle_web(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    from .web import create_server
+
+    try:
+        load_config(args.config)
+        server = create_server(
+            host=args.host,
+            port=args.port,
+            config=args.config,
+            runs=args.runs,
+            out=args.out,
+        )
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    print(f"Video Skill Gather: http://{args.host}:{server.server_port}", file=stdout)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def handle_mvp_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -81,6 +121,7 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         state=state,
         manifest=manifest,
         out_dir=args.out,
+        judge_difficulty=getattr(args, "judge_difficulty", "standard"),
     )
 
     payload = {

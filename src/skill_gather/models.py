@@ -109,6 +109,7 @@ class RunState:
     completed_stages: list[str] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     failure_reason: str | None = None
+    judge_difficulty: str = "standard"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -8,10 +8,13 @@ version = "0.1.0"
 description = "Local CLI prototype for distilling auditable skills from video evidence."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["faster-whisper>=1.1,<2"]
 
 [project.scripts]
 skill-gather = "skill_gather.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"skill_gather.web_assets" = ["*.html", "*.css", "*.js"]

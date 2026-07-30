@@ -55,7 +55,8 @@ B站公开视频 URL
 
 - Python 包依赖进入 `pyproject.toml`。
 - `yt-dlp`、`ffmpeg` 这类外部命令默认不入仓，由集成层检测并调用。
-- newapi 是外部服务，只通过 `integrations/newapi.py` 之类的薄包装访问。
+- faster-whisper 是 v0.1 主链路必需的本地 ASR 后端，由 `integrations/faster_whisper.py` 薄包装访问；模型权重、缓存和转写产物不入仓。
+- newapi 是外部服务，只通过 `integrations/newapi.py` 之类的薄包装访问，负责视觉、蒸馏和 judge；v0.1 不把 newapi 远端 ASR 作为替代路径。
 - 真正 fork 或本地 clone 的第三方源码放在 `third_party/<project-name>/`，源码默认不由主仓库跟踪。
 - 第三方来源、版本、license、patch 和调用方式登记到 `THIRD_PARTY.md` 或模块文档。
 

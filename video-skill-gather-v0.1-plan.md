@@ -15,7 +15,7 @@ metadata.json
 - **Fork-first，不自造轮子**：采集、抽帧、场景检测、ASR/OCR、蒸馏模板尽量 fork 或包装已有项目。
 - **v0.1 只做 B站主线**：YouTube 暂不实现，只保留后续扩展空间。
 - **只处理单个公开视频**：支持单个 BV/av URL；不做合集、批量、会员、付费、验证码、地区限制或绕权内容。
-- **视频画面优先理解**：不能依赖字幕；默认使用关键帧视觉理解 + 云端 ASR。
+- **视频画面优先理解**：不能依赖字幕；默认使用关键帧视觉理解 + 本地 faster-whisper ASR。
 - **只为 skill 服务**：不追求完整复原视频，只提炼可迁移、可执行、可验证的 skill。
 - **证据不足明确失败**：不硬凑高分候选；失败时保留审计包。
 - **保留证据链**：每条候选 skill 必须能追溯到时间戳、视觉/OCR/ASR 证据、置信度和风险标记。
@@ -85,7 +85,7 @@ flowchart LR
   E --> F["key frames"]
   D --> G["audio / subtitles / metadata"]
   F --> H["newapi vision / OCR"]
-  G --> I["newapi ASR"]
+  G --> I["faster-whisper ASR"]
   H --> J["EvidenceTimeline"]
   I --> J
   J --> K["Video-RIA++ distiller"]
@@ -109,7 +109,7 @@ flowchart LR
 - `ffmpeg` 负责抽音频、低清帧、必要短片段。
 - `PySceneDetect` 负责检测场景变化点。
 - newapi 视觉模型负责 OCR、代码/命令识别、UI 操作理解、PPT 要点提取。
-- newapi ASR 负责口播转写。
+- faster-whisper 负责本地口播转写，是 v0.1 必需主链路；newapi 不作为 ASR 替代路径。
 - `timeline-merger` 合并视觉、OCR、ASR、字幕和 metadata，形成带时间戳的证据链。
 
 ## 5. 关键帧策略
@@ -451,7 +451,7 @@ runs/<run-id>/
 ## 13. 假设与边界
 
 - v0.1 是自用原型，不做公开发布级安装体验。
-- 默认使用 newapi 提供云端视觉、ASR、文本蒸馏和 LLM judge。
+- 默认使用本地 faster-whisper 提供 ASR，使用 newapi 提供云端视觉、文本蒸馏和 LLM judge。
 - 用户自备 API key，模型名必须在配置文件里显式填写。
 - 不绕过平台权限、付费内容、验证码、地区限制或访问控制。
 - 不长期承诺保存原始大视频；关键帧和中间音频默认由用户手动清理。
@@ -463,7 +463,7 @@ runs/<run-id>/
 - P1：增加 YouTube adapter。
 - P1：增加批量 URL 处理。
 - P1：增加 cookie 支持，但仍不绕权、不处理付费和验证码内容。
-- P1：增加本地 OCR / 本地 ASR 作为降成本模式。
+- P1：增加本地 OCR 作为降成本模式。
 - P1：补安装说明、错误提示、成本提示、复核报告。
 - P2：增加 GitHub skill gather 入口，统一视频来源与代码仓库来源。
 - P2：做公开发布级合规声明、权限确认、日志脱敏和插件化扩展。

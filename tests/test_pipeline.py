@@ -20,7 +20,7 @@ CONFIG = {
             "base_url": "https://api.renice.cc/v1",
             "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
-            "asr_model": "asr",
+            "asr_model": "faster-whisper:base",
             "distiller_model": "distiller",
             "judge_model": "judge",
         }
@@ -307,6 +307,46 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(vision["model"], "vision")
             self.assertIn("vision_ocr_skipped", saved_manifest["risk_flags"])
 
+    def test_run_video_pipeline_uses_faster_whisper_for_asr_model_reference(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            raw_config = {
+                **CONFIG,
+                "providers": {
+                    "newapi": {
+                        **CONFIG["providers"]["newapi"],
+                        "asr_model": "faster-whisper:base",
+                    }
+                },
+            }
+            config = parse_config(raw_config)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            with patch("skill_gather.pipeline.runner.FasterWhisperClient") as client_class:
+                client_class.from_model.return_value = FakeAsrClient()
+                result = run_video_pipeline(
+                    config=config,
+                    store=store,
+                    state=state,
+                    manifest=manifest,
+                    out_dir=Path(temp_dir) / "skills",
+                    metadata_probe=FakeMetadataProbe({"title": "Skill Demo"}),
+                    media_downloader=FakeMediaDownloader(),
+                    media_processor=FakeMediaProcessor(),
+                    vision_client=FakeVisionClient(),
+                    distiller_client=FakeDistillerClient(),
+                    judge_client=FakeJudgeClient(),
+                )
+
+            asr = read_json(store.run_path(result.run_id) / "asr.json")
+            client_class.from_model.assert_called_once_with("faster-whisper:base")
+            self.assertEqual(asr["status"], "transcribed")
+            self.assertEqual(asr["model"], "faster-whisper:base")
+
     def test_run_video_pipeline_does_not_overwrite_existing_vision_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"
@@ -370,13 +410,49 @@ class PipelineTests(unittest.TestCase):
             )
 
             timeline = read_json(store.evidence_timeline_path(result.run_id))
-            self.assertEqual([item["timestamp"] for item in timeline["items"]], ["00:00:00", "00:00:10", "00:00:10"])
-            self.assertEqual(timeline["items"][0]["type"], "frame_ocr")
-            self.assertEqual(timeline["items"][0]["claim"], "The frame shows a pip install command.")
-            self.assertEqual(timeline["items"][1]["type"], "asr")
-            self.assertEqual(timeline["items"][2]["raw_excerpt"], "python -m pip install -e .")
+            self.assertEqual(
+                [item["timestamp"] for item in timeline["items"]],
+                ["00:00:00", "00:00:00", "00:00:10", "00:00:10"],
+            )
+            self.assertEqual(timeline["items"][0]["type"], "metadata_title")
+            self.assertEqual(timeline["items"][1]["type"], "frame_ocr")
+            self.assertEqual(timeline["items"][1]["claim"], "The frame shows a pip install command.")
+            self.assertEqual(timeline["items"][2]["type"], "asr")
+            self.assertEqual(timeline["items"][3]["raw_excerpt"], "python -m pip install -e .")
             distillation = read_json(store.run_path(result.run_id) / "distillation.json")
             self.assertEqual(distillation["reason"], "newapi API key is not configured")
+
+    def test_run_video_pipeline_can_limit_vision_frames(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            vision_client = FakeVisionClient()
+
+            with patch.dict(os.environ, {"SKILL_GATHER_VISION_FRAME_LIMIT": "1"}):
+                run_video_pipeline(
+                    config=config,
+                    store=store,
+                    state=state,
+                    manifest=manifest,
+                    out_dir=Path(temp_dir) / "skills",
+                    metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                    media_downloader=FakeMediaDownloader(),
+                    media_processor=FakeMediaProcessor(),
+                    asr_client=FakeAsrClient(),
+                    vision_client=vision_client,
+                )
+
+            vision = read_json(store.run_path(state.run_id) / "vision_ocr.json")
+            saved_manifest = read_json(store.manifest_path(state.run_id))
+            self.assertEqual(vision_client.calls, 1)
+            self.assertEqual(vision["frame_count"], 2)
+            self.assertEqual(vision["analyzed_frame_count"], 1)
+            self.assertIn("vision_frame_limit_applied", saved_manifest["risk_flags"])
 
     def test_run_video_pipeline_writes_successful_distillation_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -483,6 +559,43 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue((package_path / "README.md").exists())
             self.assertTrue((package_path / "metadata.json").exists())
             self.assertEqual(read_json(package_path / "metadata.json")["package_status"], "passed")
+
+    def test_run_video_pipeline_can_package_candidate_with_judge_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            judge = FakeJudgeClient(score=10)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+                judge_client=judge,
+                judge_difficulty="off",
+            )
+
+            run_dir = store.run_path(result.run_id)
+            score = read_json(run_dir / "score.json")
+            package_path = Path(result.artifacts["package"])
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(judge.calls, 0)
+            self.assertEqual(score["judge"]["status"], "disabled")
+            self.assertEqual(score["final_status"], "needs_review")
+            self.assertEqual(score["conflict_policy"], "judge_disabled")
+            self.assertTrue((package_path / "SKILL.md").exists())
 
     def test_run_video_pipeline_records_judge_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -660,8 +773,11 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(frame_extract["frame_count"], 2)
             self.assertEqual(frame_index[1]["timestamp"], "00:00:10")
             self.assertEqual(asr["status"], "transcribed")
-            self.assertEqual(timeline["items"][0]["type"], "asr")
-            self.assertEqual(timeline["items"][0]["timestamp"], "00:00:10")
+            self.assertIn("metadata_title", [item["type"] for item in timeline["items"]])
+            self.assertIn(
+                {"timestamp": "00:00:10", "type": "asr", "claim": "first step", "raw_excerpt": "first step", "confidence": 0.7},
+                timeline["items"],
+            )
             self.assertTrue((run_dir / "media_extract.json").exists())
             self.assertTrue((run_dir / "frame_index.json").exists())
             self.assertTrue((run_dir / "asr.json").exists())
@@ -896,6 +1012,42 @@ class PipelineTests(unittest.TestCase):
                 os.chdir(original_cwd)
 
             self.assertEqual(resolved, raw_path)
+
+    def test_run_video_pipeline_records_stage_timings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+                judge_client=FakeJudgeClient(),
+            )
+
+            timings_path = store.run_path(result.run_id) / "stage_timings.json"
+            timings = read_json(timings_path)
+            self.assertEqual([item["stage"] for item in timings["stages"]], PIPELINE_STAGES)
+            self.assertGreaterEqual(timings["total_duration_ms"], 0)
+            self.assertEqual(result.artifacts["stage_timings"], str(timings_path))
+            for item in timings["stages"]:
+                self.assertEqual(item["status"], "completed")
+                self.assertIn("started_at", item)
+                self.assertIn("finished_at", item)
+                self.assertGreaterEqual(item["duration_ms"], 0)
 
 
 if __name__ == "__main__":

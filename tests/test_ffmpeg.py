@@ -23,8 +23,11 @@ class FfmpegClientTests(unittest.TestCase):
         self.assertEqual(result["status"], "extracted")
         self.assertEqual(result["audio_path"], str(audio))
         args = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
         self.assertIn("-vn", args)
         self.assertEqual(args[-1], str(audio))
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
 
     def test_extract_frames_runs_ffmpeg_and_lists_frames(self):
         completed = Mock(returncode=0, stdout="", stderr="")
@@ -49,8 +52,11 @@ class FfmpegClientTests(unittest.TestCase):
         self.assertEqual(result["interval_sec"], 10)
         self.assertTrue(result["frame_paths"][0].endswith("frame-000001.jpg"))
         args = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
         self.assertIn("-vf", args)
         self.assertIn("fps=1/10", args)
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
 
     def test_extract_audio_reports_sanitized_failure(self):
         completed = Mock(returncode=1, stdout="", stderr="bad https://example.test/tmp token=x")

@@ -15,7 +15,7 @@ CONFIG = {
             "base_url": "https://api.renice.cc/v1",
             "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
-            "asr_model": "asr",
+            "asr_model": "faster-whisper:base",
             "distiller_model": "distiller",
             "judge_model": "judge",
         }
