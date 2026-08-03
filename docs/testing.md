@@ -41,7 +41,7 @@ $env:PYTHONPATH='src'; python -m skill_gather --help
 
 ```powershell
 .\.venv\Scripts\python.exe -m skill_gather benchmark-report benchmarks\v0.2-videos.json --runs .\runs
-.\.venv\Scripts\python.exe -m skill_gather vision-report runs\<full-run> runs\<sampled-run> --expected-fields benchmarks\v0.2-expected-fields.json
+.\.venv\Scripts\python.exe -m skill_gather vision-report runs\<full-run> runs\<sampled-run> --expected-fields benchmarks\v0.2-expected-fields.example.json
 ```
 
 `not_run_count` 必须原样报告，不能把未执行样本当作成功。视觉字段正确率依赖人工冻结的预期字段；没有标注时返回 `null`，不能据此宣称质量提升。
