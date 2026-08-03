@@ -99,6 +99,7 @@ def write_candidate_package(
         "",
         f"- source: {metadata.source} {metadata.source_id}",
         f"- source_url: {metadata.source_url}",
+        f"- run_variant: {metadata.run_variant or 'default'}",
         f"- package_status: {metadata.package_status}",
         f"- final_score: {metadata.scores.final_score}",
         f"- rule_score: {metadata.scores.rule_score}",
@@ -132,7 +133,10 @@ def write_candidate_package(
 def _candidate_package_name(metadata: SkillPackageMetadata, distillation: dict[str, Any]) -> str:
     raw_title = str(distillation.get("candidate_title") or metadata.title or "skill-candidate")
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", raw_title.lower()).strip("-") or "skill-candidate"
-    suffix = hashlib.sha1(f"{metadata.source}:{metadata.source_id}".encode("utf-8")).hexdigest()[:6]
+    identity = f"{metadata.source}:{metadata.source_id}"
+    if metadata.run_variant:
+        identity += f":{metadata.run_variant}"
+    suffix = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:6]
     return f"{slug[:48].strip('-')}-{suffix}"
 
 

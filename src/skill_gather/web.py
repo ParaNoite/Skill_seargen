@@ -63,6 +63,8 @@ class WebApp:
         timeline = self._optional_json(self.store.evidence_timeline_path(run_id))
         score = self._optional_json(run_dir / "score.json")
         metadata = self._optional_json(run_dir / "metadata.json")
+        human_review = self._optional_json(run_dir / "human_review.json")
+        prefilter = self._optional_json(run_dir / "prefilter.json")
         with self._lock:
             job = dict(self._jobs.get(run_id, {}))
         return {
@@ -77,6 +79,8 @@ class WebApp:
                 "sampling_strategy": timeline.get("sampling_strategy", ""),
             },
             "score": score,
+            "human_review": human_review,
+            "prefilter": prefilter,
             "risk_flags": metadata.get("risk_flags", manifest.get("risk_flags", [])),
             "job": job,
             "judge_difficulty": score.get("judge_difficulty") or state.get("judge_difficulty", "standard"),

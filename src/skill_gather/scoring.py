@@ -57,14 +57,32 @@ def conservative_score(
 
 
 def rule_score_for_distillation(distillation: dict[str, Any], timeline: EvidenceTimeline) -> int:
-    if distillation.get("status") != "distilled" or not timeline.items:
-        return 0
+    return int(rule_evaluation_for_distillation(distillation, timeline)["score"])
 
-    score = 15
+
+def rule_evaluation_for_distillation(
+    distillation: dict[str, Any],
+    timeline: EvidenceTimeline,
+) -> dict[str, Any]:
+    dimensions = {
+        "evidence": 0,
+        "candidate_title": 0,
+        "summary": 0,
+        "recall": 0,
+        "interpret": 0,
+        "apply": 0,
+        "boundary": 0,
+        "test": 0,
+        "evidence_refs": 0,
+    }
+    if distillation.get("status") != "distilled" or not timeline.items:
+        return {"score": 0, "dimensions": dimensions}
+
+    dimensions["evidence"] = 15
     if str(distillation.get("candidate_title", "")).strip():
-        score += 10
+        dimensions["candidate_title"] = 10
     if str(distillation.get("summary", "")).strip():
-        score += 5
+        dimensions["summary"] = 5
 
     ria = distillation.get("ria")
     if isinstance(ria, dict):
@@ -75,13 +93,13 @@ def rule_score_for_distillation(distillation: dict[str, Any], timeline: Evidence
             else:
                 has_content = bool(str(value or "").strip())
             if has_content:
-                score += 10
+                dimensions[key] = 10
 
     evidence_refs = distillation.get("evidence_refs", [])
     if isinstance(evidence_refs, list) and evidence_refs:
-        score += 10
+        dimensions["evidence_refs"] = 10
 
-    return min(score, 100)
+    return {"score": min(sum(dimensions.values()), 100), "dimensions": dimensions}
 
 
 def has_single_channel_evidence(timeline: EvidenceTimeline) -> bool:

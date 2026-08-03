@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
 from .adapters.bilibili import build_initial_manifest
 from .config import ConfigError, load_config
+from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
 from .models import EvidenceTimeline, SkillPackageMetadata, VideoSourceManifest
 from .mvp_check import run_mvp_check
-from .pipeline import run_video_pipeline
-from .runs import RunStore, read_json
+from .pipeline import PipelineConfigurationError, run_video_pipeline
+from .reports import build_reliability_report, build_vision_report
+from .runs import RunStore, read_json, write_json
 from .source import SourceInferenceError, infer_source
 
 
@@ -25,10 +28,27 @@ def build_parser() -> argparse.ArgumentParser:
     video.add_argument("--out", default="./skills", help="候选 skill 输出目录")
     video.add_argument("--runs", default="./runs", help="run 状态目录")
     video.add_argument(
+        "--run-variant",
+        default="",
+        help="为同一视频创建独立实验 run，例如 sampled-12",
+    )
+    video.add_argument(
         "--judge-difficulty",
         choices=["lenient", "standard", "strict", "off"],
         default="standard",
         help="judge 难度；off 表示跳过 LLM judge 并直接生成待复核候选包",
+    )
+    video.add_argument(
+        "--vision-mode",
+        choices=["full", "sampled", "off"],
+        default="full",
+        help="视觉实验模式：全帧、抽样或关闭远程视觉",
+    )
+    video.add_argument(
+        "--vision-frame-limit",
+        type=int,
+        default=12,
+        help="sampled 模式最多分析的帧数",
     )
     video.set_defaults(handler=handle_video)
 
@@ -40,6 +60,32 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("run_id")
     inspect.add_argument("--runs", default="./runs", help="run 状态目录")
     inspect.set_defaults(handler=handle_inspect)
+
+    review = subcommands.add_parser("review", help="记录 run 的人工复核结果")
+    review.add_argument("run_id")
+    review.add_argument("--runs", default="./runs", help="run 状态目录")
+    review.add_argument(
+        "--label",
+        required=True,
+        choices=sorted(HUMAN_LABEL_STATUSES),
+        help="人工标签：usable / needs_changes / unusable",
+    )
+    review.add_argument("--notes", default="", help="人工复核说明")
+    review.set_defaults(handler=handle_review)
+
+    calibrate = subcommands.add_parser("calibrate", help="比较规则、Judge 与人工标签")
+    calibrate.add_argument("dataset", help="人工标注 JSON 数组路径")
+    calibrate.set_defaults(handler=handle_calibrate)
+
+    benchmark_report = subcommands.add_parser("benchmark-report", help="汇总冻结视频集的可靠性指标")
+    benchmark_report.add_argument("benchmark", help="冻结视频集 JSON 路径")
+    benchmark_report.add_argument("--runs", default="./runs", help="run 状态目录")
+    benchmark_report.set_defaults(handler=handle_benchmark_report)
+
+    vision_report = subcommands.add_parser("vision-report", help="比较视觉实验 run 的成本与字段正确率")
+    vision_report.add_argument("run_dirs", nargs="+", help="两个或多个 run 目录")
+    vision_report.add_argument("--expected-fields", help="预期命令/OCR 字段 JSON 数组")
+    vision_report.set_defaults(handler=handle_vision_report)
 
     mvp_check = subcommands.add_parser("mvp-check", help="离线运行 v0.1 MVP 自检")
     mvp_check.add_argument(
@@ -107,7 +153,11 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         return 2
 
     store = RunStore(args.runs)
-    state = store.start_or_resume(source.source, source.source_id)
+    state = store.start_or_resume(
+        source.source,
+        source.source_id,
+        getattr(args, "run_variant", ""),
+    )
     manifest_path = store.manifest_path(state.run_id)
     if not manifest_path.exists():
         manifest = build_initial_manifest(args.url, source)
@@ -115,14 +165,20 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     else:
         manifest = VideoSourceManifest.from_dict(read_json(manifest_path))
 
-    state = run_video_pipeline(
-        config=config,
-        store=store,
-        state=state,
-        manifest=manifest,
-        out_dir=args.out,
-        judge_difficulty=getattr(args, "judge_difficulty", "standard"),
-    )
+    try:
+        state = run_video_pipeline(
+            config=config,
+            store=store,
+            state=state,
+            manifest=manifest,
+            out_dir=args.out,
+            judge_difficulty=getattr(args, "judge_difficulty", "standard"),
+            vision_mode=getattr(args, "vision_mode", "full"),
+            vision_frame_limit=getattr(args, "vision_frame_limit", 12),
+        )
+    except PipelineConfigurationError as exc:
+        print(str(exc), file=stderr)
+        return 2
 
     payload = {
         "run_id": state.run_id,
@@ -137,8 +193,21 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         payload["failure_reason"] = state.failure_reason
     if state.artifacts.get("package"):
         payload["package"] = state.artifacts["package"]
+    exit_code = 1 if state.status == "failed" else 0
+    cli_result_path = store.run_path(state.run_id) / "cli_result.json"
+    write_json(
+        cli_result_path,
+        {
+            "command": "video",
+            "status": state.status,
+            "exit_code": exit_code,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    state.artifacts["cli_result"] = str(cli_result_path)
+    store.save(state)
     print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
-    return 0
+    return exit_code
 
 
 def _video_message(state: Any) -> str:
@@ -218,8 +287,84 @@ def handle_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> 
     unique_risks = _unique(risk_flags)
     print(f"风险: {', '.join(unique_risks) if unique_risks else '无'}", file=stdout)
     _print_score_summary(store, state.run_id, metadata, stdout)
+    _print_human_review(store, state.run_id, stdout)
     _print_artifacts(state.artifacts, stdout)
     return 0
+
+
+def handle_review(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    store = RunStore(args.runs)
+    try:
+        store.load(args.run_id)
+    except FileNotFoundError as exc:
+        print(str(exc), file=stderr)
+        return 1
+
+    payload = {
+        "run_id": args.run_id,
+        "label": args.label,
+        "expected_status": HUMAN_LABEL_STATUSES[args.label],
+        "notes": str(args.notes).strip(),
+        "reviewed_at": datetime.now(UTC).isoformat(),
+    }
+    path = store.run_path(args.run_id) / "human_review.json"
+    write_json(path, payload)
+    print(json.dumps({**payload, "path": str(path)}, ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_calibrate(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        raw = read_json(args.dataset)
+        if not isinstance(raw, list):
+            raise ValueError("标注集必须是 JSON 数组。")
+        report = build_quality_report(raw)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_benchmark_report(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        benchmark = read_json(args.benchmark)
+        if not isinstance(benchmark, dict):
+            raise ValueError("冻结视频集必须是 JSON 对象。")
+        report = build_reliability_report(benchmark, args.runs)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_vision_report(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        expected_fields: list[str] = []
+        if args.expected_fields:
+            raw = read_json(args.expected_fields)
+            if not isinstance(raw, list):
+                raise ValueError("expected-fields 必须是 JSON 数组。")
+            expected_fields = [str(value) for value in raw]
+        report = build_vision_report(args.run_dirs, expected_fields)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def _print_human_review(store: RunStore, run_id: str, stdout: TextIO) -> None:
+    review = _read_optional_json(store.run_path(run_id) / "human_review.json")
+    if not review:
+        print("人工复核: 尚未记录", file=stdout)
+        return
+    text = f"人工复核: {review.get('label', 'unknown')}"
+    notes = str(review.get("notes", "")).strip()
+    if notes:
+        text += f"; {_truncate(notes, max_length=120)}"
+    print(text, file=stdout)
 
 
 def _print_evidence_summary(store: RunStore, run_id: str, stdout: TextIO) -> None:

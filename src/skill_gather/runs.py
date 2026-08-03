@@ -36,13 +36,15 @@ class RunStore:
     def failure_report_path(self, run_id: str) -> Path:
         return self.run_path(run_id) / "failure_report.md"
 
-    def start_or_resume(self, source: str, source_id: str) -> RunState:
+    def start_or_resume(self, source: str, source_id: str, run_variant: str = "") -> RunState:
         run_id = f"{source}-{safe_slug(source_id)}"
+        if run_variant.strip():
+            run_id += f"--{safe_slug(run_variant)}"
         path = self.state_path(run_id)
         if path.exists():
             return RunState.from_dict(read_json(path))
 
-        state = RunState(run_id=run_id, source_id=source_id)
+        state = RunState(run_id=run_id, source_id=source_id, run_variant=run_variant.strip())
         self.save(state)
         return state
 

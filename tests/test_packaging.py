@@ -145,6 +145,19 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue((target / "metadata.json").exists())
             self.assertTrue((target / "evidence_timeline.json").exists())
 
+            metadata.run_variant = "sampled-12"
+            variant_target = write_candidate_package(
+                Path(temp_dir) / "skills",
+                metadata,
+                distillation,
+                evidence_timeline=timeline,
+            )
+            self.assertNotEqual(variant_target, target)
+            self.assertEqual(
+                json.loads((variant_target / "metadata.json").read_text(encoding="utf-8"))["run_variant"],
+                "sampled-12",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

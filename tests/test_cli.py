@@ -114,7 +114,7 @@ class CliTests(unittest.TestCase):
                     stdout=stdout,
                 )
 
-            self.assertEqual(exit_code, 0)
+            self.assertEqual(exit_code, 1)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["source"], "bilibili")
             self.assertEqual(payload["status"], "failed")
@@ -124,6 +124,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue((runs_dir / payload["run_id"] / "manifest.json").exists())
             self.assertTrue((runs_dir / payload["run_id"] / "metadata.json").exists())
             self.assertTrue((runs_dir / payload["run_id"] / "failure_report.md").exists())
+            self.assertEqual(
+                json.loads((runs_dir / payload["run_id"] / "cli_result.json").read_text(encoding="utf-8"))["exit_code"],
+                1,
+            )
 
     def test_video_outputs_candidate_package_message_when_pipeline_completes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -162,6 +166,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["status"], "completed")
             self.assertEqual(payload["package"], str(package_dir))
             self.assertIn("候选 skill 包", payload["message"])
+
+    def test_video_run_variant_creates_independent_experiment_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config_path = temp_path / "config.json"
+            runs_dir = temp_path / "runs"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch("skill_gather.cli.run_video_pipeline", side_effect=lambda **kwargs: kwargs["state"]):
+                exit_code = main(
+                    [
+                        "video",
+                        "https://www.bilibili.com/video/BV1xx411c7mD/",
+                        "--config",
+                        str(config_path),
+                        "--runs",
+                        str(runs_dir),
+                        "--run-variant",
+                        "sampled-12",
+                    ],
+                    stdout=stdout,
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["run_id"], "bilibili-BV1xx411c7mD--sampled-12")
 
     def test_inspect_displays_manifest_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -348,7 +379,7 @@ class CliTests(unittest.TestCase):
                     stdout=second_stdout,
                 )
 
-            self.assertEqual(exit_code, 0)
+            self.assertEqual(exit_code, 1)
             restored = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(restored["title"], "already fetched")
             self.assertEqual(restored["risk_flags"], [])
@@ -382,6 +413,99 @@ class CliTests(unittest.TestCase):
             payload = json.loads(score_stdout.getvalue())
             self.assertEqual(payload["package_status"], "failed")
             self.assertEqual(payload["scores"]["final_status"], "failed")
+
+    def test_review_records_human_result_separately_from_model_scores(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runs_dir = Path(temp_dir) / "runs"
+            run_dir = runs_dir / "bilibili-BVreview"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run_state.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "bilibili-BVreview",
+                        "source_id": "BVreview",
+                        "status": "completed",
+                        "current_stage": "package",
+                        "completed_stages": [],
+                        "artifacts": {},
+                        "failure_reason": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "score.json").write_text(
+                json.dumps({"rule_score": 90, "llm_judge_score": 62, "final_status": "failed"}),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            exit_code = main(
+                [
+                    "review",
+                    "bilibili-BVreview",
+                    "--runs",
+                    str(runs_dir),
+                    "--label",
+                    "needs_changes",
+                    "--notes",
+                    "边界说明不足",
+                ],
+                stdout=stdout,
+            )
+
+            self.assertEqual(exit_code, 0)
+            review = json.loads((run_dir / "human_review.json").read_text(encoding="utf-8"))
+            score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+            self.assertEqual(review["label"], "needs_changes")
+            self.assertEqual(review["expected_status"], "needs_review")
+            self.assertEqual(review["notes"], "边界说明不足")
+            self.assertNotIn("human_review", score)
+
+    def test_calibrate_reports_rule_judge_and_final_confusion_matrices(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_path = Path(temp_dir) / "labels.json"
+            dataset_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "a",
+                            "human_label": "usable",
+                            "rule_score": 92,
+                            "judge_score": 88,
+                            "difficulty": "standard",
+                        },
+                        {
+                            "id": "b",
+                            "human_label": "needs_changes",
+                            "rule_score": 84,
+                            "judge_score": 76,
+                            "difficulty": "standard",
+                        },
+                        {
+                            "id": "c",
+                            "human_label": "unusable",
+                            "rule_score": 90,
+                            "judge_score": 40,
+                            "difficulty": "standard",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            exit_code = main(["calibrate", str(dataset_path)], stdout=stdout)
+
+            self.assertEqual(exit_code, 0)
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(report["sample_count"], 3)
+            self.assertEqual(report["rule"]["matrix"]["failed"]["passed"], 1)
+            self.assertEqual(report["judge"]["accuracy"], 1.0)
+            self.assertEqual(report["final"]["accuracy"], 1.0)
+            self.assertEqual(
+                report["judge_threshold_calibration"]["standard"]["recommended"],
+                {"passed_threshold": 85, "review_threshold": 70, "accuracy": 1.0},
+            )
 
 
 if __name__ == "__main__":

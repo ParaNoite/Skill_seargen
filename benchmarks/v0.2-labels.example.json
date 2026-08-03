@@ -1,0 +1,23 @@
+[
+  {
+    "id": "replace-with-frozen-video-1",
+    "human_label": "usable",
+    "rule_score": 92,
+    "judge_score": 88,
+    "difficulty": "standard"
+  },
+  {
+    "id": "replace-with-frozen-video-2",
+    "human_label": "needs_changes",
+    "rule_score": 82,
+    "judge_score": 76,
+    "difficulty": "standard"
+  },
+  {
+    "id": "replace-with-frozen-video-3",
+    "human_label": "unusable",
+    "rule_score": 55,
+    "judge_score": 40,
+    "difficulty": "standard"
+  }
+]

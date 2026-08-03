@@ -1,6 +1,6 @@
 # Video Skill Gather 项目规范
 
-> 本文件负责架构、目录职责、模块边界和第三方管理。`AGENTS.md` 负责 Agent 执行约束；`video-skill-gather-v0.1-plan.md` 负责产品规格和 v0.1 决策。
+> 本文件负责架构、目录职责、模块边界和第三方管理。`AGENTS.md` 负责 Agent 执行约束；`video-skill-gather-v0.1-plan.md` 保留 v0.1 决策，`docs/v0.1-to-v1.0-roadmap.md` 定义后续版本范围。
 
 ## 1. 项目定位
 
@@ -17,6 +17,8 @@ B站公开视频 URL
   -> 规则评分 + LLM judge
   -> 候选包或失败审计包
 ```
+
+v0.2 保持单个 B 站公开视频边界，增加失败可识别、蒸馏可重试、模型响应可脱敏审计、评分可拆分校准，以及视觉成本实验入口。
 
 ## 2. 目录职责
 
@@ -45,6 +47,7 @@ B站公开视频 URL
 | 管线编排 | `src/skill_gather/pipeline/` | 阶段调度、断点续跑、失败审计 |
 | skill 蒸馏 | `src/skill_gather/distillers/` | RIA++ 蒸馏、模板生成 |
 | 评分评估 | `src/skill_gather/evaluators/` | 固定规则评分和 LLM judge |
+| 质量评测 | `src/skill_gather/evaluation.py` | 人工标签映射、混淆矩阵与校准报告 |
 | 打包输出 | `src/skill_gather/packaging/` | `SKILL.md`、`README.md`、`metadata.json` 写出 |
 
 通用逻辑只有在至少两个模块实际复用、接口稳定后，才提取共享模块。不要提前建立宽泛的 `utils.py`。

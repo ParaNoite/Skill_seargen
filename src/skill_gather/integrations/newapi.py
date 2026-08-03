@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from hashlib import sha256
 import urllib.error
 import urllib.request
 from base64 import b64encode
@@ -20,11 +21,77 @@ class NewApiError(RuntimeError):
         *,
         code: str = "newapi_error",
         status_code: int | None = None,
+        response_excerpt: str = "",
     ):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
         self.safe_summary = sanitize_command_output(message)
+        self.response_audit = _model_response_audit(response_excerpt) if response_excerpt else {}
+
+
+_SAFE_RESPONSE_FIELDS = {
+    "candidate_title",
+    "summary",
+    "ria",
+    "recall",
+    "interpret",
+    "apply",
+    "boundary",
+    "test",
+    "evidence_refs",
+    "score",
+    "rationale",
+    "risk_flags",
+    "observations",
+    "type",
+    "claim",
+    "raw_excerpt",
+    "confidence",
+}
+
+
+def _model_response_audit(content: str) -> dict[str, Any]:
+    encoded = content.encode("utf-8", errors="replace")
+    audit: dict[str, Any] = {
+        "response_sha256": sha256(encoded).hexdigest(),
+        "response_length": len(content),
+        "format": "unparsed",
+    }
+    try:
+        parsed = _json_object_from_content(content)
+    except (TypeError, json.JSONDecodeError):
+        return audit
+    audit["format"] = "json"
+    audit["response_shape"] = _safe_response_shape(parsed)
+    return audit
+
+
+def _safe_response_shape(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        safe_fields = {
+            key: _safe_response_shape(item)
+            for key, item in value.items()
+            if key in _SAFE_RESPONSE_FIELDS
+        }
+        return {
+            "type": "object",
+            "fields": safe_fields,
+            "unknown_field_count": len(value) - len(safe_fields),
+        }
+    if isinstance(value, list):
+        return {
+            "type": "array",
+            "length": len(value),
+            "item": _safe_response_shape(value[0]) if value else None,
+        }
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, (int, float)):
+        return {"type": "number"}
+    if value is None:
+        return {"type": "null"}
+    return {"type": "string", "length": len(str(value))}
 
 
 def _multipart_form_data(fields: dict[str, str], file_field: str, file_name: str, file_bytes: bytes) -> tuple[bytes, str]:
@@ -417,6 +484,7 @@ class NewApiClient:
             raise NewApiError(
                 "newapi returned invalid JSON for distillation",
                 code="invalid_distillation_json",
+                response_excerpt=content,
             ) from exc
 
         ria = result.get("ria") if isinstance(result, dict) else None
@@ -431,6 +499,7 @@ class NewApiClient:
             raise NewApiError(
                 "newapi returned invalid distillation shape",
                 code="invalid_distillation_shape",
+                response_excerpt=content,
             )
 
         return {
@@ -441,6 +510,7 @@ class NewApiClient:
             "ria": ria,
             "evidence_refs": result.get("evidence_refs", []),
             "returncode": 0,
+            "_audit": _model_response_audit(content),
         }
 
     def judge_skill(
@@ -492,12 +562,14 @@ class NewApiClient:
             raise NewApiError(
                 "newapi returned invalid JSON for judge",
                 code="invalid_judge_json",
+                response_excerpt=content,
             ) from exc
 
         if not isinstance(result, dict):
             raise NewApiError(
                 "newapi returned invalid judge shape",
                 code="invalid_judge_shape",
+                response_excerpt=content,
             )
         try:
             score = int(result.get("score"))
@@ -505,17 +577,20 @@ class NewApiClient:
             raise NewApiError(
                 "newapi returned invalid judge shape",
                 code="invalid_judge_shape",
+                response_excerpt=content,
             ) from exc
         if score < 0 or score > 100:
             raise NewApiError(
                 "newapi returned invalid judge shape",
                 code="invalid_judge_shape",
+                response_excerpt=content,
             )
         risk_flags = result.get("risk_flags", [])
         if not isinstance(risk_flags, list):
             raise NewApiError(
                 "newapi returned invalid judge shape",
                 code="invalid_judge_shape",
+                response_excerpt=content,
             )
         return {
             "status": "judged",
@@ -524,4 +599,5 @@ class NewApiClient:
             "rationale": str(result.get("rationale", "")),
             "risk_flags": [str(flag) for flag in risk_flags],
             "returncode": 0,
+            "_audit": _model_response_audit(content),
         }

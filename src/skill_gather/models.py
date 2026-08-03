@@ -110,6 +110,9 @@ class RunState:
     artifacts: dict[str, str] = field(default_factory=dict)
     failure_reason: str | None = None
     judge_difficulty: str = "standard"
+    vision_mode: str = "full"
+    vision_frame_limit: int = 12
+    run_variant: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,6 +153,7 @@ class SkillPackageMetadata:
     source_url: str
     title: str = ""
     author: str = ""
+    run_variant: str = ""
     generated_at: str = ""
     package_status: PackageStatus = "failed"
     models: dict[str, str] = field(default_factory=dict)
@@ -171,6 +175,7 @@ class SkillPackageMetadata:
             "source_url": self.source_url,
             "title": self.title,
             "author": self.author,
+            "run_variant": self.run_variant,
             "generated_at": self.generated_at,
             "package_status": self.package_status,
             "models": dict(self.models),
@@ -200,6 +205,7 @@ class SkillPackageMetadata:
             source_url=value.get("source_url", ""),
             title=value.get("title", ""),
             author=value.get("author", ""),
+            run_variant=value.get("run_variant", ""),
             generated_at=value.get("generated_at", ""),
             package_status=value.get("package_status", "failed"),
             models=dict(value.get("models", {})),

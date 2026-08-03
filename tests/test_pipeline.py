@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -53,8 +54,10 @@ class FakeMediaDownloader:
             "returncode": 0,
         }
         self.error = error
+        self.calls = 0
 
     def download_media(self, url, target_dir):
+        self.calls += 1
         if self.error is not None:
             raise self.error
         target = Path(target_dir)
@@ -179,6 +182,17 @@ class FakeDistillerClient:
             ],
             "returncode": 0,
         }
+
+
+class RetryingDistillerClient(FakeDistillerClient):
+    def distill_skill(self, evidence_timeline, manifest, model):
+        self.calls += 1
+        if self.calls == 1:
+            raise NewApiError(
+                "invalid response https://example.test/tmp token=secret",
+                code="invalid_distillation_json",
+            )
+        return super().distill_skill(evidence_timeline, manifest, model)
 
 
 class FakeJudgeClient:
@@ -454,6 +468,72 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(vision["analyzed_frame_count"], 1)
             self.assertIn("vision_frame_limit_applied", saved_manifest["risk_flags"])
 
+    def test_run_video_pipeline_can_disable_remote_vision_and_records_cost_metrics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            vision_client = FakeVisionClient()
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=vision_client,
+                vision_mode="off",
+            )
+
+            vision = read_json(store.run_path(result.run_id) / "vision_ocr.json")
+            self.assertEqual(vision_client.calls, 0)
+            self.assertEqual(vision["status"], "skipped")
+            self.assertEqual(vision["strategy"], "off")
+            self.assertEqual(vision["source_frame_count"], 2)
+            self.assertEqual(vision["remote_call_count"], 0)
+
+    def test_run_video_pipeline_prefilter_rejects_obviously_too_short_video_before_download(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            downloader = FakeMediaDownloader()
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "", "duration": 8}),
+                media_downloader=downloader,
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(),
+                judge_client=FakeJudgeClient(),
+            )
+
+            prefilter = read_json(store.run_path(result.run_id) / "prefilter.json")
+            media = read_json(store.run_path(result.run_id) / "media_extract.json")
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(prefilter["status"], "rejected")
+            self.assertEqual(prefilter["reason_code"], "duration_too_short")
+            self.assertEqual(media["status"], "skipped")
+            self.assertEqual(downloader.calls, 0)
+
     def test_run_video_pipeline_writes_successful_distillation_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"
@@ -553,6 +633,8 @@ class PipelineTests(unittest.TestCase):
             package_path = Path(result.artifacts["package"])
             self.assertEqual(result.status, "completed")
             self.assertEqual(score["llm_judge_score"], 86)
+            self.assertEqual(score["rule"]["dimensions"]["boundary"], 10)
+            self.assertEqual(score["rule"]["dimensions"]["test"], 10)
             self.assertEqual(score["final_status"], "passed")
             self.assertEqual(metadata["package_status"], "passed")
             self.assertTrue((package_path / "SKILL.md").exists())
@@ -678,6 +760,41 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("[redacted-url]", distillation["summary"])
             self.assertNotIn("token=x", distillation["summary"])
             self.assertIn("distillation_failed", saved_manifest["risk_flags"])
+
+    def test_run_video_pipeline_retries_recoverable_distillation_and_audits_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            manifest = build_initial_manifest(url, source)
+            state = store.start_or_resume(source.source, source.source_id)
+            store.save_manifest(state.run_id, manifest)
+            distiller = RetryingDistillerClient()
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=distiller,
+                judge_client=FakeJudgeClient(),
+            )
+
+            run_dir = store.run_path(result.run_id)
+            audit = read_json(run_dir / "model_audit.json")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(distiller.calls, 3)
+            self.assertEqual(audit["distillation"]["attempt_count"], 2)
+            self.assertEqual(audit["distillation"]["attempts"][0]["reason_code"], "invalid_distillation_json")
+            self.assertIn("[redacted-url]", audit["distillation"]["attempts"][0]["summary"])
+            self.assertNotIn("token=secret", json.dumps(audit))
 
     def test_run_video_pipeline_does_not_overwrite_existing_distillation_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1048,6 +1165,31 @@ class PipelineTests(unittest.TestCase):
                 self.assertIn("started_at", item)
                 self.assertIn("finished_at", item)
                 self.assertGreaterEqual(item["duration_ms"], 0)
+
+    def test_run_video_pipeline_rejects_parameter_changes_when_resuming_completed_stages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            state = store.start_or_resume("bilibili", "BV1xx411c7mD")
+            state.completed_stages = ["manifest"]
+            state.judge_difficulty = "standard"
+            state.vision_mode = "full"
+            state.vision_frame_limit = 12
+            store.save(state)
+            manifest = build_initial_manifest(
+                "https://www.bilibili.com/video/BV1xx411c7mD/",
+                infer_source("https://www.bilibili.com/video/BV1xx411c7mD/"),
+            )
+
+            with self.assertRaisesRegex(ValueError, "run-variant"):
+                run_video_pipeline(
+                    config=config,
+                    store=store,
+                    state=state,
+                    manifest=manifest,
+                    out_dir=Path(temp_dir) / "skills",
+                    judge_difficulty="strict",
+                )
 
 
 if __name__ == "__main__":

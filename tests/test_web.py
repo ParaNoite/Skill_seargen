@@ -58,6 +58,14 @@ class WebAppTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (run_dir / "human_review.json").write_text(
+                json.dumps({"label": "usable", "expected_status": "passed", "notes": "可复用"}),
+                encoding="utf-8",
+            )
+            (run_dir / "prefilter.json").write_text(
+                json.dumps({"status": "accepted", "reason_code": "basic_metadata_passed"}),
+                encoding="utf-8",
+            )
             app = WebApp(config=str(root / "config.json"), runs=str(root / "runs"), out=str(root / "skills"))
 
             runs = app.list_runs()
@@ -66,6 +74,8 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(runs[0]["title"], "Demo video")
             self.assertEqual(detail["status"], "completed")
             self.assertEqual(detail["progress"], 22)
+            self.assertEqual(detail["human_review"]["label"], "usable")
+            self.assertEqual(detail["prefilter"]["status"], "accepted")
 
     def test_rejects_path_like_run_id(self):
         app = WebApp(config="config.json", runs="runs", out="skills")

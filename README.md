@@ -2,7 +2,7 @@
 
 Video Skill Gather 是一个本地 Python CLI 原型，用于从 B 站公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包。
 
-当前版本覆盖从视频采集到候选包生成的 v0.1 主链路：元数据与媒体采集、抽帧、本地 faster-whisper ASR、newapi 视觉/OCR、证据时间线合并、RIA++ skill 草案蒸馏、规则评分、LLM judge，以及通过阈值后的候选包写出。证据不足或外部能力不可用时，系统会保留失败审计包，方便人工复核和重跑。
+当前版本是 v0.2，在 v0.1 视频主链路上补齐失败退出码、蒸馏有限重试、脱敏模型审计、规则评分分项、人工复核与校准报告。视觉阶段支持全帧、抽样和关闭三种实验模式，并记录远程调用数；缺少标题且明显过短的视频会在下载前被低成本预筛拒绝。
 
 ## 项目文档
 
@@ -81,6 +81,10 @@ $env:HF_HOME="$PWD\.hf-cache"
 skill-gather video <bilibili-url> --config config.json --out ./skills --runs ./runs
 skill-gather score <skill-dir>
 skill-gather inspect <run-id> --runs ./runs
+skill-gather review <run-id> --runs ./runs --label needs_changes --notes "边界需要补充"
+skill-gather calibrate benchmarks/v0.2-labels.example.json
+skill-gather benchmark-report benchmarks/v0.2-videos.json --runs ./runs
+skill-gather vision-report runs/<full-run> runs/<sampled-run> --expected-fields benchmarks/v0.2-expected-fields.example.json
 skill-gather mvp-check --config configs/skill-gather.example.json
 ```
 
@@ -95,7 +99,25 @@ skill-gather mvp-check --config configs/skill-gather.example.json
 - `video`：处理单个 B 站公开视频，并生成候选包或失败审计包。
 - `score`：对已有候选 skill 目录重新评分。
 - `inspect`：查看 run 的证据摘要、阶段状态和评分结果。
+- `review`：将人工的 `usable / needs_changes / unusable` 结论独立写入 `human_review.json`。
+- `calibrate`：比较规则、Judge、最终决策与人工标签，输出三套混淆矩阵。
+- `benchmark-report`：汇总冻结视频集的执行数、失败数、重试、退出码和模型审计覆盖。
+- `vision-report`：比较多个视觉实验 run 的远程调用数、耗时和人工定义字段正确率。
 - `mvp-check`：使用 fake clients 离线验证候选包与失败审计两条主分支。
+
+失败 run 的 `video` 命令退出码为 `1`，参数或配置错误为 `2`。脚本和后续批处理不能只解析输出文本，应同时检查退出码和 JSON 中的 `status`。
+
+视觉成本实验示例：
+
+```powershell
+skill-gather video <bilibili-url> --config config.json --vision-mode sampled --vision-frame-limit 12
+skill-gather video <bilibili-url> --config config.json --vision-mode sampled --vision-frame-limit 12 --run-variant sampled-12
+skill-gather video <bilibili-url> --config config.json --vision-mode off --run-variant vision-off
+```
+
+每个 run 的 `vision_ocr.json` 记录 `source_frame_count`、`analyzed_frame_count`、`remote_call_count` 和 `strategy`。`stage_timings.json` 可用于同一输入、机器和模型配置下的墙钟时间比较。
+
+同一 run 一旦完成阶段，就不能改用不同的 Judge 或视觉参数恢复；必须使用不同的 `--run-variant`，防止实验结果混用旧产物。
 
 ## 本地 Web 界面
 

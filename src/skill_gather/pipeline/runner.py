@@ -31,7 +31,7 @@ from ..models import (
 )
 from ..packaging import write_audit_package, write_candidate_package
 from ..runs import RunStore, read_json, write_json
-from ..scoring import conservative_score, has_single_channel_evidence, normalize_judge_difficulty, rule_score_for_distillation
+from ..scoring import conservative_score, has_single_channel_evidence, normalize_judge_difficulty, rule_evaluation_for_distillation
 from ..source import SourceInfo
 
 
@@ -90,6 +90,10 @@ class JudgeClient(Protocol):
         ...
 
 
+class PipelineConfigurationError(ValueError):
+    pass
+
+
 def run_video_pipeline(
     *,
     config: AppConfig,
@@ -105,13 +109,32 @@ def run_video_pipeline(
     distiller_client: DistillerClient | None = None,
     judge_client: JudgeClient | None = None,
     judge_difficulty: str = "standard",
+    vision_mode: str = "full",
+    vision_frame_limit: int = 12,
 ) -> RunState:
+    normalized_difficulty = normalize_judge_difficulty(judge_difficulty)
+    normalized_vision_mode = vision_mode if vision_mode in {"full", "sampled", "off"} else "full"
+    normalized_frame_limit = max(1, int(vision_frame_limit))
+    env_frame_limit = _vision_frame_limit()
+    if normalized_vision_mode == "full" and env_frame_limit is not None:
+        normalized_vision_mode = "sampled"
+        normalized_frame_limit = env_frame_limit
+    if state.completed_stages and (
+        state.judge_difficulty != normalized_difficulty
+        or state.vision_mode != normalized_vision_mode
+        or state.vision_frame_limit != normalized_frame_limit
+    ):
+        raise PipelineConfigurationError(
+            "不能用不同的 Judge 或视觉参数恢复已有 run；请通过 --run-variant 创建独立实验 run。"
+        )
     if state.status in {"completed", "failed"} and state.completed_stages == PIPELINE_STAGES:
         return state
 
     state.status = "running"
     state.failure_reason = None
-    state.judge_difficulty = normalize_judge_difficulty(judge_difficulty)
+    state.judge_difficulty = normalized_difficulty
+    state.vision_mode = normalized_vision_mode
+    state.vision_frame_limit = normalized_frame_limit
     store.save(state)
 
     probe = metadata_probe or YtDlpClient()
@@ -150,7 +173,14 @@ def run_video_pipeline(
         store,
         state,
         "vision_ocr",
-        lambda: _write_vision_result(store, state, config, vision),
+        lambda: _write_vision_result(
+            store,
+            state,
+            config,
+            vision,
+            vision_mode=state.vision_mode,
+            vision_frame_limit=state.vision_frame_limit,
+        ),
     )
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
     _run_regular_stage(
@@ -275,6 +305,7 @@ def _probe_manifest(
         manifest = VideoSourceManifest.from_dict(read_json(path))
         if "metadata_pending" not in manifest.risk_flags:
             _write_media_probe(store, state, "metadata_available", "")
+            _write_prefilter(store, state, manifest)
             state.artifacts["manifest"] = str(path)
             return
 
@@ -297,7 +328,36 @@ def _probe_manifest(
         updated = manifest_from_yt_dlp_metadata(manifest.url, source, metadata)
         store.save_manifest(state.run_id, updated)
         _write_media_probe(store, state, "metadata_available", "")
+        _write_prefilter(store, state, updated)
+    if not (store.run_path(state.run_id) / "prefilter.json").exists():
+        _write_prefilter(store, state, manifest)
     state.artifacts["manifest"] = str(path)
+
+
+def _write_prefilter(store: RunStore, state: RunState, manifest: VideoSourceManifest) -> None:
+    path = store.run_path(state.run_id) / "prefilter.json"
+    if not manifest.title.strip() and 0 < manifest.duration_sec < 15:
+        payload = {
+            "status": "rejected",
+            "reason_code": "duration_too_short",
+            "summary": "视频缺少标题且不足 15 秒，跳过高成本媒体和模型阶段。",
+            "duration_sec": manifest.duration_sec,
+        }
+    elif manifest.duration_sec <= 0:
+        payload = {
+            "status": "indeterminate",
+            "reason_code": "duration_unavailable",
+            "summary": "缺少可用时长，保留主链路的既有失败语义。",
+            "duration_sec": manifest.duration_sec,
+        }
+    else:
+        payload = {
+            "status": "accepted",
+            "reason_code": "basic_metadata_passed",
+            "duration_sec": manifest.duration_sec,
+        }
+    write_json(path, payload)
+    state.artifacts["prefilter"] = str(path)
 
 
 def _without_flag(flags: list[str], flag: str) -> list[str]:
@@ -343,7 +403,17 @@ def _write_media_extract(
     if existing.get("status") not in {"downloaded", "failed"}:
         manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
         probe_path = store.run_path(state.run_id) / "media_probe.json"
-        if "metadata_probe_failed" in manifest.risk_flags:
+        prefilter_path = store.run_path(state.run_id) / "prefilter.json"
+        prefilter = read_json(prefilter_path) if prefilter_path.exists() else {}
+        if prefilter.get("status") == "rejected":
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": f"prefilter rejected input: {prefilter.get('reason_code', 'rejected')}",
+                },
+            )
+        elif "metadata_probe_failed" in manifest.risk_flags:
             reason = "metadata probe failed; media extraction was not attempted"
             write_json(path, {"status": "skipped", "reason": reason, "requires": ["yt-dlp"]})
         elif probe_path.exists() and read_json(probe_path).get("status") == "metadata_available":
@@ -594,16 +664,37 @@ def _write_vision_result(
     state: RunState,
     config: AppConfig,
     vision_client: VisionClient | None,
+    *,
+    vision_mode: str = "full",
+    vision_frame_limit: int = 12,
 ) -> None:
     path = store.run_path(state.run_id) / "vision_ocr.json"
     if not path.exists():
         frames = read_frame_index(store, state.run_id)
-        if not frames:
+        if vision_mode == "off":
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": "remote vision was disabled for this experiment",
+                    "strategy": "off",
+                    "source_frame_count": len(frames),
+                    "analyzed_frame_count": 0,
+                    "remote_call_count": 0,
+                    "items": [],
+                    "errors": [],
+                },
+            )
+        elif not frames:
             write_json(
                 path,
                 {
                     "status": "skipped",
                     "reason": "no frame index is available",
+                    "strategy": vision_mode,
+                    "source_frame_count": 0,
+                    "analyzed_frame_count": 0,
+                    "remote_call_count": 0,
                     "items": [],
                     "errors": [],
                 },
@@ -617,6 +708,10 @@ def _write_vision_result(
                     "reason": "newapi API key is not configured",
                     "requires": ["newapi"],
                     "model": config.newapi.vision_model,
+                    "strategy": vision_mode,
+                    "source_frame_count": len(frames),
+                    "analyzed_frame_count": 0,
+                    "remote_call_count": 0,
                     "items": [],
                     "errors": [],
                 },
@@ -625,8 +720,11 @@ def _write_vision_result(
             items: list[dict[str, Any]] = []
             errors: list[dict[str, Any]] = []
             original_frame_count = len(frames)
-            frame_limit = _vision_frame_limit()
-            selected_frames = frames[:frame_limit] if frame_limit is not None else frames
+            frame_limit = None
+            strategy = vision_mode
+            if vision_mode == "sampled":
+                frame_limit = max(1, vision_frame_limit)
+            selected_frames = _select_vision_frames(frames, frame_limit)
             if frame_limit is not None and original_frame_count > len(selected_frames):
                 _append_manifest_risk(store, state, "vision_frame_limit_applied")
             for frame in selected_frames:
@@ -664,8 +762,11 @@ def _write_vision_result(
                 {
                     "status": status,
                     "model": config.newapi.vision_model,
+                    "strategy": strategy,
+                    "source_frame_count": original_frame_count,
                     "frame_count": original_frame_count,
                     "analyzed_frame_count": len(selected_frames),
+                    "remote_call_count": len(selected_frames),
                     "items": items,
                     "errors": errors,
                 },
@@ -682,6 +783,16 @@ def _vision_frame_limit() -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _select_vision_frames(frames: list[FrameManifest], limit: int | None) -> list[FrameManifest]:
+    if limit is None or limit >= len(frames):
+        return frames
+    if limit == 1:
+        return frames[:1]
+    last_index = len(frames) - 1
+    indices = [round(index * last_index / (limit - 1)) for index in range(limit)]
+    return [frames[index] for index in indices]
 
 
 def _write_evidence_timeline(store: RunStore, state: RunState) -> None:
@@ -819,7 +930,18 @@ def _write_distillation(
     if not path.exists():
         timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
         manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
-        if not timeline.items:
+        prefilter_path = store.run_path(state.run_id) / "prefilter.json"
+        prefilter = read_json(prefilter_path) if prefilter_path.exists() else {}
+        if prefilter.get("status") == "rejected":
+            write_json(
+                path,
+                {
+                    "status": "skipped",
+                    "reason": f"prefilter rejected input: {prefilter.get('reason_code', 'rejected')}",
+                    "candidate_title": "",
+                },
+            )
+        elif not timeline.items:
             write_json(
                 path,
                 {
@@ -841,29 +963,93 @@ def _write_distillation(
                 },
             )
         else:
-            try:
-                result = distiller_client.distill_skill(
-                    timeline.to_dict(),
-                    manifest.to_dict(),
-                    config.newapi.distiller_model,
-                )
-            except NewApiError as exc:
+            result, error = _distill_with_retry(
+                distiller_client,
+                timeline,
+                manifest,
+                config.newapi.distiller_model,
+                store.run_path(state.run_id) / "model_audit.json",
+            )
+            state.artifacts["model_audit"] = str(store.run_path(state.run_id) / "model_audit.json")
+            if error is not None:
                 _append_manifest_risk(store, state, "distillation_failed")
                 write_json(
                     path,
                     {
                         "status": "failed",
-                        "reason_code": exc.code,
-                        "returncode": exc.status_code,
-                        "summary": exc.safe_summary,
+                        "reason_code": error.code,
+                        "returncode": error.status_code,
+                        "summary": error.safe_summary,
                         "model": config.newapi.distiller_model,
                         "candidate_title": "",
                     },
                 )
             else:
+                assert result is not None
                 result["model"] = config.newapi.distiller_model
                 write_json(path, result)
     state.artifacts["distillation"] = str(path)
+
+
+def _distill_with_retry(
+    client: DistillerClient,
+    timeline: EvidenceTimeline,
+    manifest: VideoSourceManifest,
+    model: str,
+    audit_path: Path,
+) -> tuple[dict[str, Any] | None, NewApiError | None]:
+    recoverable_codes = {"invalid_distillation_json", "invalid_distillation_shape"}
+    attempts: list[dict[str, Any]] = []
+    result: dict[str, Any] | None = None
+    error: NewApiError | None = None
+
+    for attempt_number in range(1, 3):
+        try:
+            result = client.distill_skill(timeline.to_dict(), manifest.to_dict(), model)
+        except NewApiError as exc:
+            error = exc
+            attempts.append(
+                {
+                    "attempt": attempt_number,
+                    "status": "failed",
+                    "reason_code": exc.code,
+                    "returncode": exc.status_code,
+                    "summary": exc.safe_summary,
+                    "response_audit": exc.response_audit,
+                    "retryable": exc.code in recoverable_codes,
+                }
+            )
+            if exc.code not in recoverable_codes or attempt_number == 2:
+                break
+        else:
+            error = None
+            audit = result.pop("_audit", {}) if isinstance(result, dict) else {}
+            attempts.append(
+                {
+                    "attempt": attempt_number,
+                    "status": "succeeded",
+                    "response_audit": audit,
+                }
+            )
+            break
+
+    _update_model_audit(
+        audit_path,
+        "distillation",
+        {
+            "model": model,
+            "attempt_count": len(attempts),
+            "reused_evidence_timeline": len(attempts) > 1,
+            "attempts": attempts,
+        },
+    )
+    return result, error
+
+
+def _update_model_audit(path: Path, operation: str, payload: dict[str, Any]) -> None:
+    audit = read_json(path) if path.exists() else {}
+    audit[operation] = payload
+    write_json(path, audit)
 
 
 def _write_score(
@@ -878,7 +1064,8 @@ def _write_score(
         timeline = EvidenceTimeline.from_dict(read_json(store.evidence_timeline_path(state.run_id)))
         manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
         distillation = read_json(store.run_path(state.run_id) / "distillation.json")
-        rule_score = rule_score_for_distillation(distillation, timeline)
+        rule_evaluation = rule_evaluation_for_distillation(distillation, timeline)
+        rule_score = int(rule_evaluation["score"])
         single_channel = has_single_channel_evidence(timeline)
         judge_record: dict[str, Any]
         if distillation.get("status") != "distilled":
@@ -930,11 +1117,34 @@ def _write_score(
                     "reason_code": exc.code,
                     "returncode": exc.status_code,
                     "summary": exc.safe_summary,
+                    "response_audit": exc.response_audit,
                     "model": config.newapi.judge_model,
                 }
+                _update_model_audit(
+                    store.run_path(state.run_id) / "model_audit.json",
+                    "judge",
+                    {
+                        "model": config.newapi.judge_model,
+                        "status": "failed",
+                        "reason_code": exc.code,
+                        "summary": exc.safe_summary,
+                        "response_audit": exc.response_audit,
+                    },
+                )
             else:
+                audit = judge_record.pop("_audit", {})
                 judge_score = int(judge_record.get("score", 0))
                 judge_record["model"] = config.newapi.judge_model
+                _update_model_audit(
+                    store.run_path(state.run_id) / "model_audit.json",
+                    "judge",
+                    {
+                        "model": config.newapi.judge_model,
+                        "status": "succeeded",
+                        "response_audit": audit,
+                    },
+                )
+                state.artifacts["model_audit"] = str(store.run_path(state.run_id) / "model_audit.json")
                 for flag in judge_record.get("risk_flags", []):
                     if str(flag) == "single_channel_evidence":
                         single_channel = True
@@ -954,6 +1164,7 @@ def _write_score(
                 difficulty=judge_difficulty,
             )
         payload = score.to_dict()
+        payload["rule"] = rule_evaluation
         payload["judge_difficulty"] = judge_difficulty
         payload["judge"] = judge_record
         payload["single_channel_evidence"] = single_channel
@@ -985,6 +1196,7 @@ def _run_package_stage(
             source_url=manifest.url,
             title=manifest.title,
             author=manifest.author,
+            run_variant=state.run_variant,
             generated_at=datetime.now(UTC).isoformat(),
             package_status=score.final_status,
             models={

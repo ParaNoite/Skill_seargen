@@ -1,0 +1,25 @@
+{
+  "benchmark_id": "v0.2-public-tutorials-2026-08-03",
+  "frozen_at": "2026-08-03",
+  "scope": "Bilibili public tutorial videos observed during local v0.1 validation",
+  "videos": [
+    {
+      "source": "bilibili",
+      "source_id": "BV1Fr4y1f73F",
+      "url": "https://www.bilibili.com/video/BV1Fr4y1f73F/",
+      "topic": "Python merge Excel workbooks"
+    },
+    {
+      "source": "bilibili",
+      "source_id": "BV1Jgf6YvE8e",
+      "url": "https://www.bilibili.com/video/BV1Jgf6YvE8e/",
+      "topic": "Python beginner tutorial"
+    },
+    {
+      "source": "bilibili",
+      "source_id": "BV1RZYSzaEnz",
+      "url": "https://www.bilibili.com/video/BV1RZYSzaEnz/",
+      "topic": "Repair incomplete Python uninstall"
+    }
+  ]
+}

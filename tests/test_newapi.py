@@ -580,6 +580,9 @@ class NewApiClientTests(unittest.TestCase):
         self.assertEqual(result["status"], "judged")
         self.assertEqual(result["score"], 86)
         self.assertEqual(result["risk_flags"], ["single_channel_evidence"])
+        self.assertEqual(result["_audit"]["response_length"] > 0, True)
+        self.assertIn("response_sha256", result["_audit"])
+        self.assertEqual(result["_audit"]["response_shape"]["type"], "object")
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://api.example.test/v1/chat/completions")
         payload = json.loads(request.data.decode("utf-8"))
@@ -625,6 +628,37 @@ class NewApiClientTests(unittest.TestCase):
                 )
 
         self.assertEqual(context.exception.code, "invalid_distillation_shape")
+
+    def test_distill_skill_audits_parse_failure_without_persisting_response_content(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "not-json token=secret https://example.test/private"
+                            }
+                        }
+                    ]
+                }
+            ),
+        ):
+            with self.assertRaises(NewApiError) as context:
+                NewApiClient(
+                    base_url="https://api.example.test/v1/",
+                    api_key="secret-key",
+                ).distill_skill(
+                    {"items": [{"timestamp": "00:00:10", "type": "asr", "claim": "Use editable installs."}]},
+                    {"title": "Skill Demo"},
+                    "distiller-model",
+                )
+
+        audit = context.exception.response_audit
+        self.assertEqual(audit["format"], "unparsed")
+        self.assertIn("response_sha256", audit)
+        self.assertNotIn("token=secret", json.dumps(audit))
+        self.assertNotIn("example.test", json.dumps(audit))
 
 
 if __name__ == "__main__":
