@@ -126,7 +126,7 @@ class WebHttpTests(unittest.TestCase):
 
         self.assertEqual(page_status, 200)
         self.assertIn("text/html", page_type)
-        self.assertIn("Video Skill Gather", page.decode("utf-8"))
+        self.assertIn("skill_seargen", page.decode("utf-8"))
         self.assertEqual(api_status, 200)
         self.assertIn("application/json", api_type)
         self.assertEqual(json.loads(payload), {"runs": []})

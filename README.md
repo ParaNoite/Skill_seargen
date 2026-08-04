@@ -1,8 +1,8 @@
-# Video Skill Gather
+# skill_seargen
 
-Video Skill Gather 是一个本地 Python CLI 原型，用于从 B 站公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包。
+`skill_seargen`（search and generate）是一个本地 Python CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并建立主题研究任务的可恢复底座。
 
-当前版本是 v0.2，在 v0.1 视频主链路上补齐失败退出码、蒸馏有限重试、脱敏模型审计、规则评分分项、人工复核与校准报告。视觉阶段支持全帧、抽样和关闭三种实验模式，并记录远程调用数；缺少标题且明显过短的视频会在下载前被低成本预筛拒绝。
+当前版本是 v0.3。v0.2 的单视频可靠性与评测能力保持不变；v0.3 新增主题任务、主题包结构、预算与缓存策略，以及可恢复的主题 run。搜索、候选确认和实际多来源处理仍属于后续版本范围。
 
 ## 项目文档
 
@@ -46,6 +46,10 @@ $env:NEWAPI_API_KEY="your-key"
 
 不要把真实 API key、cookie、token 或个人绝对路径提交进 Git。
 
+### 主题任务默认值
+
+`topic_defaults` 用于约束后续主题研究的候选数量、来源数量、视频时长、模型调用、费用和运行时间。`reuse_cache` 默认启用；`refresh_cache` 记录显式刷新意图，供后续的搜索和来源处理阶段使用。示例配置已包含默认值。
+
 ## ASR 模型
 
 ASR 是 v0.1 主链路的必需能力，默认使用本地 faster-whisper。推荐从较小模型开始验证：
@@ -86,6 +90,9 @@ skill-gather calibrate benchmarks/v0.2-labels.example.json
 skill-gather benchmark-report benchmarks/v0.2-videos.json --runs ./runs
 skill-gather vision-report runs/<full-run> runs/<sampled-run> --expected-fields benchmarks/v0.2-expected-fields.example.json
 skill-gather mvp-check --config configs/skill-gather.example.json
+skill-gather topic create "Godot 导航" --mode technical --runs ./runs
+skill-gather topic inspect <topic-run-id> --runs ./runs
+skill-gather topic resume <topic-run-id> --runs ./runs
 ```
 
 也可以通过模块方式调用：
@@ -104,6 +111,9 @@ skill-gather mvp-check --config configs/skill-gather.example.json
 - `benchmark-report`：汇总冻结视频集的执行数、失败数、重试、退出码和模型审计覆盖。
 - `vision-report`：比较多个视觉实验 run 的远程调用数、耗时和人工定义字段正确率。
 - `mvp-check`：使用 fake clients 离线验证候选包与失败审计两条主分支。
+- `topic create`：创建或恢复普通/技术模式的主题任务，并保存预算、缓存和主题包索引。
+- `topic inspect`：以 JSON 查看主题 run 的阶段、失败信息和将来产物路径。
+- `topic resume`：将失败的主题 run 恢复到失败前的阶段，并保留失败审计信息。
 
 失败 run 的 `video` 命令退出码为 `1`，参数或配置错误为 `2`。脚本和后续批处理不能只解析输出文本，应同时检查退出码和 JSON 中的 `status`。
 

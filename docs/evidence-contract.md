@@ -11,6 +11,15 @@
 | `EvidenceTimeline` | ASR、OCR、视觉观察和 metadata 合并后的时间线 |
 | `RunState` | 阶段状态、已完成阶段、失败原因和 artifact 路径 |
 | `SkillPackageMetadata` | skill 候选状态、模型配置、证据摘要、评分和风险 |
+| `TopicTask` | 主题、普通/技术模式、预算、用量、缓存、来源选择、状态、失败审计和主题包索引 |
+| `TopicPackage` | 主题包中 `sources.json`、`evidence/`、`references/` 及未来文档产物的相对路径 |
+
+## 主题任务契约
+
+- 主题 run 使用 `created`、`searching`、`awaiting_selection`、`processing_sources`、`generating`、`scoring`、`completed` 或 `failed` 状态。
+- `TopicBudget` 限制候选数、已选来源数、视频时长、模型调用、费用估算和运行时间；来源处理阶段必须通过 `TopicRunStore.record_usage()` 写入实际用量。超限时任务标记为 `failed`，并记录失败阶段和原因。
+- `TopicCachePolicy` 默认复用缓存；显式刷新意图必须写入主题任务，供后续搜索和来源处理阶段读取。
+- 主题包路径必须相对主题 run 目录，且不得记录 API key、cookie、token 或临时下载 URL。
 
 ## 通用规则
 

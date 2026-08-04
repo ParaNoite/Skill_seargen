@@ -29,6 +29,42 @@ CONFIG = {
 
 
 class CliTests(unittest.TestCase):
+    def test_topic_create_and_inspect_persist_a_theme_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runs_dir = Path(temp_dir) / "runs"
+            create_stdout = io.StringIO()
+
+            exit_code = main(
+                [
+                    "topic",
+                    "create",
+                    "Godot 导航",
+                    "--mode",
+                    "technical",
+                    "--runs",
+                    str(runs_dir),
+                    "--max-candidates",
+                    "8",
+                ],
+                stdout=create_stdout,
+            )
+
+            self.assertEqual(exit_code, 0)
+            created = json.loads(create_stdout.getvalue())
+            self.assertEqual(created["mode"], "technical")
+            self.assertEqual(created["budget"]["max_candidates"], 8)
+
+            inspect_stdout = io.StringIO()
+            inspect_exit_code = main(
+                ["topic", "inspect", created["run_id"], "--runs", str(runs_dir)],
+                stdout=inspect_stdout,
+            )
+
+            self.assertEqual(inspect_exit_code, 0)
+            inspected = json.loads(inspect_stdout.getvalue())
+            self.assertEqual(inspected["topic"], "Godot 导航")
+            self.assertEqual(inspected["status"], "created")
+
     def test_score_outputs_json_when_metadata_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             skill_dir = Path(temp_dir) / "skill"

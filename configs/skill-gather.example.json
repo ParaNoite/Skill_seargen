@@ -13,5 +13,16 @@
     "provider": "newapi",
     "output_dir": "./skills",
     "run_dir": "./runs"
+  },
+  "topic_defaults": {
+    "max_candidates": 20,
+    "max_selected_sources": 5,
+    "max_video_duration_sec": 3600,
+    "max_model_calls": 100,
+    "max_estimated_cost_usd": 10.0,
+    "max_runtime_sec": 3600,
+    "reuse_cache": true,
+    "refresh_cache": false,
+    "judge_difficulty": "standard"
   }
 }

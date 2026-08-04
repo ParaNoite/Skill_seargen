@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .integrations.faster_whisper import is_faster_whisper_model
+from .models import JUDGE_DIFFICULTIES, TopicBudget, TopicCachePolicy
 
 
 class ConfigError(ValueError):
@@ -23,11 +24,19 @@ class NewApiConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TopicDefaults:
+    budget: TopicBudget
+    cache: TopicCachePolicy
+    judge_difficulty: str = "standard"
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     provider: str
     output_dir: str
     run_dir: str
     newapi: NewApiConfig
+    topic_defaults: TopicDefaults
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -65,9 +74,40 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     if not is_faster_whisper_model(asr_model):
         raise ConfigError("ASR 是主链路必需能力；newapi.asr_model 必须写成 faster-whisper:<模型名或本地模型路径>。")
 
+    try:
+        topic_defaults = _parse_topic_defaults(raw.get("topic_defaults", {}))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"主题任务配置无效：{exc}") from exc
+
     return AppConfig(
         provider=provider,
         output_dir=defaults.get("output_dir", "./skills"),
         run_dir=defaults.get("run_dir", "./runs"),
         newapi=NewApiConfig(**{key: newapi_raw[key] for key in required}),
+        topic_defaults=topic_defaults,
     )
+
+
+def _parse_topic_defaults(raw: Any) -> TopicDefaults:
+    if not isinstance(raw, dict):
+        raise ValueError("topic_defaults 必须是对象")
+
+    budget_keys = {
+        "max_candidates",
+        "max_selected_sources",
+        "max_video_duration_sec",
+        "max_model_calls",
+        "max_estimated_cost_usd",
+        "max_runtime_sec",
+    }
+    budget = TopicBudget.from_dict({key: raw[key] for key in budget_keys if key in raw})
+    cache = TopicCachePolicy.from_dict(
+        {key: raw[key] for key in {"reuse_cache", "refresh_cache"} if key in raw}
+    )
+    if not isinstance(cache.reuse_cache, bool) or not isinstance(cache.refresh_cache, bool):
+        raise ValueError("缓存策略必须使用布尔值")
+
+    judge_difficulty = str(raw.get("judge_difficulty", "standard"))
+    if judge_difficulty not in JUDGE_DIFFICULTIES:
+        raise ValueError("judge_difficulty 必须是 lenient、standard、strict 或 off")
+    return TopicDefaults(budget=budget, cache=cache, judge_difficulty=judge_difficulty)

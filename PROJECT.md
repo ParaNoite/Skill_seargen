@@ -1,10 +1,10 @@
-# Video Skill Gather 项目规范
+# skill_seargen 项目规范
 
 > 本文件负责架构、目录职责、模块边界和第三方管理。`AGENTS.md` 负责 Agent 执行约束；`video-skill-gather-v0.1-plan.md` 保留 v0.1 决策，`docs/v0.1-to-v1.0-roadmap.md` 定义后续版本范围。
 
 ## 1. 项目定位
 
-Video Skill Gather 是一个本地 CLI 原型，用于从 B站公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包。
+`skill_seargen` 是一个本地 CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并为主题研究任务提供本地可恢复状态。
 
 v0.1 不追求完整视频下载器或通用多平台系统，只跑通：
 
@@ -19,6 +19,8 @@ B站公开视频 URL
 ```
 
 v0.2 保持单个 B 站公开视频边界，增加失败可识别、蒸馏可重试、模型响应可脱敏审计、评分可拆分校准，以及视觉成本实验入口。
+
+v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策略。它不包含搜索、候选确认、网页抓取、多视频处理或多来源证据融合；这些能力必须在后续版本通过独立模块接入。
 
 ## 2. 目录职责
 
@@ -42,6 +44,7 @@ v0.2 保持单个 B 站公开视频边界，增加失败可识别、蒸馏可重
 |---|---|---|
 | CLI | `src/skill_gather/cli.py` | 命令入口、参数解析、面向用户的错误语义 |
 | 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、评分结果 |
+| 主题任务 | `src/skill_gather/topics.py` | 主题 run 的持久化、状态推进、预算用量、失败审计与恢复 |
 | 来源适配 | `src/skill_gather/adapters/` | B站、未来 YouTube 等平台适配 |
 | 外部集成 | `src/skill_gather/integrations/` | `yt-dlp`、`ffmpeg`、newapi 等工具/API 的薄包装 |
 | 管线编排 | `src/skill_gather/pipeline/` | 阶段调度、断点续跑、失败审计 |
@@ -86,6 +89,10 @@ v0.2 保持单个 B 站公开视频边界，增加失败可识别、蒸馏可重
 - `EvidenceTimeline`
 - `RunState`
 - `SkillPackageMetadata`
+- `TopicTask`
+- `TopicPackage`
+
+主题任务通过 `TopicTask` 交接主题、模式、预算、实际用量、缓存策略、候选来源、已选来源、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；当前 v0.3 只创建 `sources.json`、`references/` 和 `evidence/` 的骨架，`knowledge.md`、`SKILL.md` 与 `score.json` 仍由后续阶段写入。
 
 所有 manifest 和运行记录必须使用仓库相对路径或用户显式配置的输出路径，不得写入凭据、cookie 或临时下载 URL。
 

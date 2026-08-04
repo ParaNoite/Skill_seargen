@@ -6,6 +6,9 @@ from skill_gather.models import (
     FrameManifest,
     ScoreResult,
     SkillPackageMetadata,
+    TopicBudget,
+    TopicPackage,
+    TopicTask,
 )
 
 
@@ -75,6 +78,37 @@ class ModelRoundTripTests(unittest.TestCase):
         self.assertEqual(restored.package_status, "needs_review")
         self.assertEqual(restored.scores.final_score, 82)
         self.assertEqual(restored.evidence[0].type, "asr")
+
+    def test_topic_task_round_trips_technical_mode_and_optional_package_files(self):
+        task = TopicTask(
+            run_id="topic-godot-12345678",
+            topic="Godot 导航",
+            mode="technical",
+            output_language="zh-CN",
+            budget=TopicBudget(max_candidates=12, max_selected_sources=3),
+            package=TopicPackage(
+                root="topic_package",
+                sources="topic_package/sources.json",
+                evidence="topic_package/evidence",
+                references="topic_package/references",
+            ),
+        )
+
+        restored = TopicTask.from_dict(task.to_dict())
+
+        self.assertEqual(restored.mode, "technical")
+        self.assertEqual(restored.budget.max_candidates, 12)
+        self.assertIsNone(restored.package.skill)
+        self.assertEqual(restored.package.references, "topic_package/references")
+
+    def test_topic_task_round_trips_normal_mode_without_optional_package(self):
+        task = TopicTask(run_id="topic-drawing-12345678", topic="绘画入门")
+
+        restored = TopicTask.from_dict(task.to_dict())
+
+        self.assertEqual(restored.mode, "normal")
+        self.assertIsNone(restored.package)
+        self.assertEqual(restored.cache.to_dict(), {"reuse_cache": True, "refresh_cache": False})
 
 
 if __name__ == "__main__":

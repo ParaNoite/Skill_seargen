@@ -10,12 +10,20 @@ from typing import Any, TextIO
 from .adapters.bilibili import build_initial_manifest
 from .config import ConfigError, load_config
 from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
-from .models import EvidenceTimeline, SkillPackageMetadata, VideoSourceManifest
+from .models import (
+    EvidenceTimeline,
+    JUDGE_DIFFICULTIES,
+    SkillPackageMetadata,
+    TopicBudget,
+    TopicCachePolicy,
+    VideoSourceManifest,
+)
 from .mvp_check import run_mvp_check
 from .pipeline import PipelineConfigurationError, run_video_pipeline
 from .reports import build_reliability_report, build_vision_report
 from .runs import RunStore, read_json, write_json
 from .source import SourceInferenceError, infer_source
+from .topics import TopicRunStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     video.add_argument(
         "--judge-difficulty",
-        choices=["lenient", "standard", "strict", "off"],
+        choices=JUDGE_DIFFICULTIES,
         default="standard",
         help="judge 难度；off 表示跳过 LLM judge 并直接生成待复核候选包",
     )
@@ -51,6 +59,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="sampled 模式最多分析的帧数",
     )
     video.set_defaults(handler=handle_video)
+
+    topic = subcommands.add_parser("topic", help="创建和查看主题研究任务")
+    topic_commands = topic.add_subparsers(dest="topic_command", required=True)
+    topic_create = topic_commands.add_parser("create", help="创建或恢复一个主题 run")
+    topic_create.add_argument("topic", help="要研究的主题")
+    topic_create.add_argument("--mode", choices=["normal", "technical"], default="normal")
+    topic_create.add_argument("--output-language", default="zh-CN")
+    topic_create.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_create.add_argument("--config", help="可选配置文件，用于读取主题预算默认值")
+    topic_create.add_argument("--max-candidates", type=int)
+    topic_create.add_argument("--max-selected-sources", type=int)
+    topic_create.add_argument("--max-video-duration-sec", type=int)
+    topic_create.add_argument("--max-model-calls", type=int)
+    topic_create.add_argument("--max-estimated-cost-usd", type=float)
+    topic_create.add_argument("--max-runtime-sec", type=int)
+    topic_create.add_argument(
+        "--judge-difficulty",
+        choices=JUDGE_DIFFICULTIES,
+    )
+    cache_group = topic_create.add_mutually_exclusive_group()
+    cache_group.add_argument("--reuse-cache", action="store_true", default=None)
+    cache_group.add_argument("--no-reuse-cache", action="store_false", dest="reuse_cache")
+    topic_create.add_argument("--refresh-cache", action="store_true", default=None)
+    topic_create.set_defaults(handler=handle_topic_create)
+
+    topic_inspect = topic_commands.add_parser("inspect", help="查看主题 run 的状态和主题包索引")
+    topic_inspect.add_argument("run_id")
+    topic_inspect.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_inspect.set_defaults(handler=handle_topic_inspect)
+
+    topic_resume = topic_commands.add_parser("resume", help="恢复失败的主题 run")
+    topic_resume.add_argument("run_id")
+    topic_resume.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_resume.set_defaults(handler=handle_topic_resume)
 
     score = subcommands.add_parser("score", help="读取 skill 包评分")
     score.add_argument("skill_dir")
@@ -122,7 +164,7 @@ def handle_web(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         print(str(exc), file=stderr)
         return 2
 
-    print(f"Video Skill Gather: http://{args.host}:{server.server_port}", file=stdout)
+    print(f"skill_seargen: http://{args.host}:{server.server_port}", file=stdout)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -208,6 +250,69 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     store.save(state)
     print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
     return exit_code
+
+
+def handle_topic_create(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        budget = TopicBudget()
+        cache = TopicCachePolicy()
+        judge_difficulty = "standard"
+        if args.config:
+            defaults = load_config(args.config).topic_defaults
+            budget = defaults.budget
+            cache = defaults.cache
+            judge_difficulty = defaults.judge_difficulty
+
+        budget_values = budget.to_dict()
+        for name in budget_values:
+            value = getattr(args, name)
+            if value is not None:
+                budget_values[name] = value
+        cache_values = cache.to_dict()
+        if args.reuse_cache is not None:
+            cache_values["reuse_cache"] = args.reuse_cache
+        if args.refresh_cache is not None:
+            cache_values["refresh_cache"] = args.refresh_cache
+        if args.judge_difficulty:
+            judge_difficulty = args.judge_difficulty
+
+        store = TopicRunStore(args.runs)
+        task = store.start_or_resume(
+            topic=args.topic,
+            mode=args.mode,
+            output_language=args.output_language,
+            budget=TopicBudget.from_dict(budget_values),
+            cache=TopicCachePolicy.from_dict(cache_values),
+            judge_difficulty=judge_difficulty,
+        )
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_topic_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        task = TopicRunStore(args.runs).load(args.run_id)
+    except FileNotFoundError as exc:
+        print(str(exc), file=stderr)
+        return 1
+
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_topic_resume(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        task = TopicRunStore(args.runs).resume(args.run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 1
+
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    return 0
 
 
 def _video_message(state: Any) -> str:

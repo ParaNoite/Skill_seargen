@@ -73,6 +73,34 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_config(raw)
 
+    def test_parses_topic_budget_defaults_and_cache_policy(self):
+        raw = {
+            **VALID_CONFIG,
+            "topic_defaults": {
+                "max_candidates": 12,
+                "max_selected_sources": 3,
+                "max_video_duration_sec": 900,
+                "max_model_calls": 20,
+                "max_estimated_cost_usd": 4.5,
+                "max_runtime_sec": 600,
+                "reuse_cache": True,
+                "refresh_cache": False,
+                "judge_difficulty": "strict",
+            },
+        }
+
+        config = parse_config(raw)
+
+        self.assertEqual(config.topic_defaults.budget.max_candidates, 12)
+        self.assertTrue(config.topic_defaults.cache.reuse_cache)
+        self.assertEqual(config.topic_defaults.judge_difficulty, "strict")
+
+    def test_rejects_invalid_topic_budget(self):
+        raw = {**VALID_CONFIG, "topic_defaults": {"max_candidates": 0}}
+
+        with self.assertRaises(ConfigError):
+            parse_config(raw)
+
 
 if __name__ == "__main__":
     unittest.main()

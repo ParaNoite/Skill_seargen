@@ -1,6 +1,6 @@
 {
-  "name": "video-skill-gather",
-  "version": "0.1.0",
+  "name": "skill-seargen",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "scripts\\dev.cmd",

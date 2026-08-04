@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import EvidenceTimeline
-from .models import PackageStatus, ScoreResult
-
-
-JUDGE_DIFFICULTIES = {"lenient", "standard", "strict", "off"}
+from .models import EvidenceTimeline, JUDGE_DIFFICULTIES, PackageStatus, ScoreResult
 
 
 def normalize_judge_difficulty(value: str | None) -> str:
