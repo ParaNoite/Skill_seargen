@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from skill_gather.cli import main
+from skill_gather.github_processing import GitHubFile, GitHubRepositorySnapshot, process_github_sources
 from skill_gather.models import TopicSourceCandidate
 from skill_gather.topic_processing import process_web_sources, write_knowledge_markdown
 from skill_gather.topics import TopicRunStore
@@ -136,6 +137,109 @@ class TopicProcessingTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_process_github_sources_writes_technical_evidence_and_reference(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Skill 工具开发", mode="technical")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                canonical_url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                title="example/toolkit",
+                quality_score=40,
+                selected=True,
+            )
+            task.candidates = [candidate]
+            task.selected_sources = [candidate]
+
+            def fetcher(_url, *, timeout_sec):
+                self.assertEqual(timeout_sec, 7)
+                return GitHubRepositorySnapshot(
+                    repo="example/toolkit",
+                    html_url="https://github.com/example/toolkit",
+                    default_branch="main",
+                    files=[
+                        GitHubFile("README.md", "# Toolkit\n\nInstall with `pip install toolkit`.\n\nUsage: `python -m toolkit`.", ""),
+                        GitHubFile("docs/api.md", "API 参数说明：调用 generate_skill(topic)。", ""),
+                        GitHubFile("SKILL.md", "Codex skill instructions for the existing workflow.", ""),
+                    ],
+                )
+
+            result = process_github_sources(task, store.run_path(task.run_id), timeout_sec=7, fetcher=fetcher)
+            run_root = store.run_path(task.run_id)
+
+            self.assertEqual(len(result.evidence), 1)
+            self.assertFalse(result.failures)
+            self.assertTrue((run_root / "topic_package/evidence/github-cand-github.json").exists())
+            reference = run_root / "topic_package/references/github-cand-github.md"
+            self.assertTrue(reference.exists())
+            self.assertIn("已有 skill 材料", reference.read_text(encoding="utf-8"))
+            self.assertIn("github_existing_skill_material_downgraded", candidate.risk_flags)
+
+    def test_process_github_sources_skips_github_in_normal_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("普通主题", mode="normal")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                canonical_url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                selected=True,
+            )
+            task.selected_sources = [candidate]
+
+            result = process_github_sources(task, store.run_path(task.run_id), fetcher=lambda *_args, **_kwargs: None)
+
+            self.assertFalse(result.evidence)
+            self.assertEqual(result.skipped[0]["candidate_id"], "cand-github")
+            self.assertIn("普通模式", result.skipped[0]["reason"])
+
+    def test_topic_process_command_completes_technical_github_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Skill 工具开发", mode="technical")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                canonical_url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                title="example/toolkit",
+                selected=True,
+            )
+            task.candidates = [candidate]
+            task.selected_sources = [candidate]
+            task.status = "processing_sources"
+            task.current_stage = "processing_sources"
+            store.save(task)
+
+            def fetcher(_url, *, timeout_sec):
+                return GitHubRepositorySnapshot(
+                    repo="example/toolkit",
+                    html_url="https://github.com/example/toolkit",
+                    default_branch="main",
+                    files=[GitHubFile("README.md", "安装：pip install toolkit\n命令：python -m toolkit", "")],
+                )
+
+            from io import StringIO
+            from unittest.mock import patch
+
+            stdout = StringIO()
+            with patch("skill_gather.github_processing.fetch_public_github_repository", side_effect=fetcher):
+                exit_code = main(
+                    ["topic", "process", task.run_id, "--runs", str(store.root)],
+                    stdout=stdout,
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["status"], "completed")
+            self.assertEqual(payload["successful_github_sources"], 1)
+            self.assertIsNone(payload["knowledge"])
+            saved = store.load(task.run_id)
+            self.assertEqual(saved.artifacts["github_processing_audit"], "github_processing_audit.json")
 
 
 if __name__ == "__main__":

@@ -25,9 +25,9 @@ def process_web_sources(
     timeout_sec: int = 15,
     fetcher: Callable[..., WebPage] = fetch_public_page,
 ) -> WebProcessingResult:
-    """Create v0.5 webpage evidence from explicitly selected normal-mode sources."""
-    if task.mode != "normal":
-        raise ValueError("v0.5 只处理普通模式的网页来源；技术模式留待 v0.7。")
+    """Create webpage evidence from explicitly selected normal or technical sources."""
+    if task.mode not in {"normal", "technical"}:
+        raise ValueError("网页来源处理只支持 normal 或 technical 主题模式。")
     package = task.package
     if package is None:
         raise ValueError("主题任务缺少主题包索引")

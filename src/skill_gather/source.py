@@ -27,8 +27,13 @@ def infer_source(url: str) -> SourceInfo:
         source_id = extract_bilibili_id(url)
         return SourceInfo(source="bilibili", source_id=source_id)
 
+    if host == "github.com":
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2:
+            return SourceInfo(source="github", source_id="/".join(parts[:2]))
+
     raise SourceInferenceError(
-        "无法从 URL 自动判断来源；v0.1 只支持 B站公开视频 URL。"
+        "无法从 URL 自动判断来源；当前只支持 B站公开视频 URL 和公开 GitHub 仓库 URL。"
     )
 
 

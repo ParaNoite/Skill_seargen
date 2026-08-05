@@ -2,7 +2,7 @@
 
 `skill_seargen`（search and generate）是一个本地 Python CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并建立主题研究任务的可恢复底座。
 
-当前版本是 v0.6。v0.2 的单视频可靠性与评测能力、v0.3 的主题任务底座、v0.4 的搜索和候选确认、v0.5 的网页知识总结保持不变。v0.6 将公开视频接入主题子 run，汇入主题级视频证据，并提供视频级失败隔离和预算控制；跨来源结论融合仍留待后续版本。
+当前版本推进到 v0.7。v0.2 的单视频可靠性与评测能力、v0.3 的主题任务底座、v0.4 的搜索和候选确认、v0.5 的网页知识总结、v0.6 的多视频主题处理保持不变。v0.7 让技术模式开始处理公开 GitHub 仓库来源：轻量分析 README、docs、examples、配置、入口和已有 skill 格式材料，并写入可复核的主题证据；跨来源结论融合仍留待后续版本。
 
 ## 项目文档
 
@@ -14,6 +14,7 @@
 - [docs/evidence-contract.md](docs/evidence-contract.md)：证据链 manifest 契约。
 - [docs/v0.5-closure.md](docs/v0.5-closure.md)：v0.5 网页知识总结结项与验收说明。
 - [docs/v0.6-closure.md](docs/v0.6-closure.md)：v0.6 多视频主题处理结项与验收说明。
+- [docs/v0.7-closure.md](docs/v0.7-closure.md)：v0.7 技术模式与 GitHub 来源结项与验收说明。
 - [docs/testing.md](docs/testing.md)：测试规范。
 
 ## 安装
@@ -121,7 +122,7 @@ skill-gather topic resume <topic-run-id> --runs ./runs
 - `topic search`：按模式调用搜索 provider，写入候选、查询审计和 `sources.json`；`--fake` 用于离线验证。
 - `topic candidates`：查看候选 ID、来源类型、质量分、风险和查询来源。
 - `topic select`：显式确认候选来源；v0.4 原子写入 `TopicTask.selected_sources` 与 `topic_package/sources.json`，状态进入 `processing_sources`，但不触发下载、抓取、ASR、视觉分析或生成。
-- `topic process`：处理普通模式中已确认的网页和公开视频；网页生成带引用的中文 `knowledge.md`，视频写入主题级时间线证据。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制，GitHub 来源仍会跳过。
+- `topic process`：处理已确认的网页、公开视频和技术模式 GitHub 来源；网页生成带引用的中文 `knowledge.md`，视频写入主题级时间线证据，GitHub 仓库写入轻量文件摘要和关键片段证据。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制；普通模式不会强行处理 GitHub。
 - `topic inspect`：以 JSON 查看主题 run 的阶段、失败信息和将来产物路径。
 - `topic resume`：将失败的主题 run 恢复到失败前的阶段，并保留失败审计信息。
 

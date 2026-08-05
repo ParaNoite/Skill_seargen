@@ -115,7 +115,7 @@ function renderTopic(topic) {
   const videoRunSummary = videoRuns.length ? `<div class="topic-video-runs"><strong>视频子 run</strong>${videoRuns.map(run => `<span>${escapeHtml(run.candidate_id)} · ${escapeHtml(run.status)}${run.vision_status ? ` · 视觉：${escapeHtml(run.vision_status)}${run.vision_reason ? `（${escapeHtml(displayVisionReason(run.vision_reason))}）` : ""}` : ""}${run.failure_reason ? ` · ${escapeHtml(run.failure_reason)}` : ""}</span>`).join("")}</div>` : "";
   const confirmation = topic.status === "processing_sources" ? `
     <section class="topic-confirmation" aria-live="polite">
-      <div><strong>已确认 ${selectedSources.length} 条来源</strong><span>网页会生成知识总结，公开视频会写入主题证据。</span></div>
+      <div><strong>已确认 ${selectedSources.length} 条来源</strong><span>网页会生成知识总结，公开视频和 GitHub 仓库会写入主题证据。</span></div>
       <div class="topic-processing-controls">${processControls}${processButton}${jobStatus}</div>
       <ul>${selectedSources.map(source => `<li>${escapeHtml(source.title || source.url)}</li>`).join("")}</ul>
       ${videoRunSummary}
@@ -125,6 +125,7 @@ function renderTopic(topic) {
       <div><strong>${topic.status === "completed" ? "主题处理完成" : "主题处理失败"}</strong><span>${escapeHtml(topic.failure_reason || job.error || "请查看下方子 run 与处理产物。")}</span></div>
       ${topic.artifacts?.knowledge ? `<span class="status completed">知识总结：${escapeHtml(topic.artifacts.knowledge)}</span>` : ""}
       ${topic.artifacts?.video_processing_audit ? `<span class="status completed">视频审计：${escapeHtml(topic.artifacts.video_processing_audit)}</span>` : ""}
+      ${topic.artifacts?.github_processing_audit ? `<span class="status completed">GitHub 审计：${escapeHtml(topic.artifacts.github_processing_audit)}</span>` : ""}
       ${videoRunSummary}
     </section>` : "";
   topicDetail.innerHTML = `

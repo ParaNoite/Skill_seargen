@@ -10,6 +10,7 @@ from typing import Any, TextIO
 from .adapters.bilibili import build_initial_manifest
 from .config import ConfigError, load_config
 from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
+from .github_processing import process_github_sources
 from .models import (
     EvidenceTimeline,
     JUDGE_DIFFICULTIES,
@@ -115,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     topic_select.add_argument("--runs", default="./runs", help="主题 run 状态目录")
     topic_select.set_defaults(handler=handle_topic_select)
 
-    topic_process = topic_commands.add_parser("process", help="处理已确认的网页和视频来源")
+    topic_process = topic_commands.add_parser("process", help="处理已确认的网页、视频和技术模式 GitHub 来源")
     topic_process.add_argument("run_id")
     topic_process.add_argument("--runs", default="./runs", help="主题 run 状态目录")
     topic_process.add_argument("--timeout-sec", type=int, default=15, help="单个网页请求超时秒数")
@@ -422,7 +423,13 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
         run_root = store.run_path(args.run_id)
         web_result = process_web_sources(task, run_root, timeout_sec=args.timeout_sec)
         selected_videos = [candidate for candidate in task.selected_sources if candidate.source_type == "video"]
+        selected_github = [
+            candidate
+            for candidate in task.selected_sources
+            if task.mode == "technical" and candidate.source_type == "github"
+        ]
         video_result = None
+        github_result = None
         if selected_videos:
             video_result = process_topic_videos(
                 task,
@@ -435,19 +442,29 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
             web_result.skipped = [
                 item for item in web_result.skipped if item.get("candidate_id") not in successful_video_ids
             ]
+        if selected_github:
+            github_result = process_github_sources(task, run_root, timeout_sec=args.timeout_sec)
+            successful_github_ids = {str(record["candidate_id"]) for record in github_result.evidence}
+            web_result.skipped = [
+                item for item in web_result.skipped if item.get("candidate_id") not in successful_github_ids
+            ]
         _save_processed_topic_sources(store, task)
         task.artifacts["web_processing_audit"] = "web_processing_audit.json"
         task.artifacts["web_evidence"] = task.package.evidence if task.package else ""
         if video_result is not None:
             task.artifacts["video_processing_audit"] = "video_processing_audit.json"
             task.artifacts["video_runs"] = "video_runs"
+        if github_result is not None:
+            task.artifacts["github_processing_audit"] = "github_processing_audit.json"
+            task.artifacts["github_evidence"] = task.package.evidence if task.package else ""
         store.save(task)
         task = store.record_usage(args.run_id, task.usage)
         successful_video_count = len(video_result.successful) if video_result is not None else 0
+        successful_github_count = len(github_result.evidence) if github_result is not None else 0
         if task.status == "failed":
             pass
-        elif not web_result.evidence and not successful_video_count:
-            task = store.fail(args.run_id, "没有成功提取可用的网页正文或视频证据；请检查处理审计文件")
+        elif not web_result.evidence and not successful_video_count and not successful_github_count:
+            task = store.fail(args.run_id, "没有成功提取可用的网页正文、视频证据或 GitHub 证据；请检查处理审计文件")
         else:
             store.advance(args.run_id, "generating")
             if web_result.evidence:
@@ -469,7 +486,13 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
         "failed_web_sources": len(web_result.failures),
         "successful_video_sources": len(video_result.successful) if video_result is not None else 0,
         "failed_video_sources": len(video_result.failed) if video_result is not None else 0,
-        "skipped_sources": len(web_result.skipped) + (len(video_result.skipped) if video_result is not None else 0),
+        "successful_github_sources": len(github_result.evidence) if github_result is not None else 0,
+        "failed_github_sources": len(github_result.failures) if github_result is not None else 0,
+        "skipped_sources": (
+            len(web_result.skipped)
+            + (len(video_result.skipped) if video_result is not None else 0)
+            + (len(github_result.skipped) if github_result is not None else 0)
+        ),
         "knowledge": (
             task.artifacts.get("knowledge")
             if task.package and task.package.knowledge and (run_root / task.package.knowledge).exists()
