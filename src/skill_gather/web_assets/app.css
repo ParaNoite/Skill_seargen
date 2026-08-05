@@ -68,6 +68,34 @@ button { cursor: pointer; }
 }
 
 .shell { max-width: 1440px; margin: 0 auto; padding: 28px; }
+.topic-panel {
+  margin-bottom: 20px;
+  padding: 24px 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.topic-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+.topic-form { display: flex; align-items: center; gap: 9px; min-width: min(760px, 100%); }
+.topic-form input { min-width: 180px; }
+.topic-form select { width: 130px; }
+.check-label { display: inline-flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.check-label input { width: auto; height: auto; }
+.topic-workspace { display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: 220px; margin-top: 16px; border-top: 1px solid var(--line); }
+.topics-list { border-right: 1px solid var(--line); }
+.topic-item { width: 100%; padding: 12px 14px; border: 0; border-bottom: 1px solid var(--line); text-align: left; color: inherit; background: transparent; }
+.topic-item:hover, .topic-item.active { background: var(--green-soft); }
+.topic-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.topic-item-meta { margin-top: 5px; color: var(--muted); font-size: 11px; }
+.topic-detail { min-width: 0; padding: 16px 20px; }
+.topic-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.candidate-list { display: grid; gap: 8px; }
+.candidate-card { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.candidate-card input { width: 17px; height: 17px; margin-top: 2px; }
+.candidate-title { font-weight: 650; overflow-wrap: anywhere; }
+.candidate-summary { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.candidate-meta { margin-top: 6px; color: var(--muted); font-size: 11px; }
+.candidate-score { color: var(--green-dark); font-weight: 750; white-space: nowrap; }
 .submit-panel {
   display: grid;
   grid-template-columns: minmax(260px, .75fr) minmax(420px, 1.25fr);
@@ -143,6 +171,12 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
 .model-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .model-chip { padding: 4px 7px; border: 1px solid #cdd9d3; border-radius: 4px; background: #fff; font-size: 12px; overflow-wrap: anywhere; }
 .models-total { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.topic-confirmation { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; margin: 14px 0; padding: 13px; border: 1px solid #b9d8c2; border-left: 3px solid var(--green); background: var(--green-soft); }
+.topic-confirmation strong, .topic-confirmation span { display: block; }
+.topic-confirmation span { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.topic-confirmation .status { margin-top: 0; }
+.topic-confirmation ul { grid-column: 1 / -1; margin: 0; padding-left: 18px; color: var(--ink); font-size: 13px; }
+.topic-confirmation li + li { margin-top: 4px; }
 
 .workspace {
   min-height: 590px;
@@ -233,6 +267,9 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
 .loading.compact { padding: 0; }
 
 @media (max-width: 900px) {
+  .topic-heading { align-items: stretch; flex-direction: column; }
+  .topic-form { min-width: 0; flex-wrap: wrap; }
+  .topic-form input { flex: 1 1 220px; }
   .submit-panel { grid-template-columns: 1fr; gap: 20px; }
   .workspace { grid-template-columns: 280px minmax(0, 1fr); }
   .detail-grid { grid-template-columns: 1fr; }
@@ -245,6 +282,9 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
   .topbar { padding: 0 16px; }
   .local-status { display: none; }
   .shell { padding: 16px; }
+  .topic-panel { padding: 21px 18px; }
+  .topic-workspace { display: block; }
+  .topics-list { border-right: 0; border-bottom: 1px solid var(--line); }
   .submit-panel { padding: 21px 18px; }
   .input-row { align-items: stretch; flex-direction: column; }
   .workspace { display: block; }

@@ -65,6 +65,43 @@ class CliTests(unittest.TestCase):
             self.assertEqual(inspected["topic"], "Godot 导航")
             self.assertEqual(inspected["status"], "created")
 
+    def test_topic_fake_search_lists_and_selects_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runs_dir = root / "runs"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            create_stdout = io.StringIO()
+            self.assertEqual(
+                main(["topic", "create", "Godot 导航", "--mode", "technical", "--runs", str(runs_dir)], stdout=create_stdout),
+                0,
+            )
+            run_id = json.loads(create_stdout.getvalue())["run_id"]
+
+            search_stdout = io.StringIO()
+            self.assertEqual(
+                main(
+                    ["topic", "search", run_id, "--runs", str(runs_dir), "--config", str(config_path), "--fake"],
+                    stdout=search_stdout,
+                ),
+                0,
+            )
+            searched = json.loads(search_stdout.getvalue())
+            self.assertEqual(searched["status"], "awaiting_selection")
+            self.assertEqual(len(searched["candidates"]), 3)
+            candidate_id = searched["candidates"][0]["candidate_id"]
+
+            select_stdout = io.StringIO()
+            self.assertEqual(
+                main(["topic", "select", run_id, candidate_id, "--runs", str(runs_dir)], stdout=select_stdout),
+                0,
+            )
+            selected = json.loads(select_stdout.getvalue())
+            self.assertEqual(selected["status"], "processing_sources")
+            self.assertEqual(selected["usage"]["selected_source_count"], 1)
+            sources = json.loads((runs_dir / run_id / "topic_package" / "sources.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(sources["selected_sources"]), 1)
+
     def test_score_outputs_json_when_metadata_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             skill_dir = Path(temp_dir) / "skill"

@@ -14,6 +14,13 @@
 | `TopicTask` | 主题、普通/技术模式、预算、用量、缓存、来源选择、状态、失败审计和主题包索引 |
 | `TopicPackage` | 主题包中 `sources.json`、`evidence/`、`references/` 及未来文档产物的相对路径 |
 
+## v0.4 搜索候选契约
+
+- 搜索 provider 只返回 `RawSearchResult` 元数据，不返回网页正文、下载路径、cookie 或浏览器会话。
+- `TopicSourceCandidate.candidate_id` 使用规范化 URL 的稳定哈希；`canonical_url`、`providers`、`engines`、`queries`、`quality_score`、`risk_flags` 和 `duplicate_count` 用于排序与审计。
+- `topic_package/sources.json` 同时保存候选草稿、显式选择和 provider warning；`search_audit.json` 保存查询、批次、返回数量、命中引擎、缓存命中和失败信息。
+- 用户确认前不得进入网页抓取、视频下载、ASR、视觉理解或 GitHub 仓库分析。确认动作只推进主题 run 到后续处理入口。
+
 ## 主题任务契约
 
 - 主题 run 使用 `created`、`searching`、`awaiting_selection`、`processing_sources`、`generating`、`scoring`、`completed` 或 `failed` 状态。

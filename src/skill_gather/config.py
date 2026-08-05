@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +31,28 @@ class TopicDefaults:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchConfig:
+    cache_ttl_sec: int = 86400
+    timeout_sec: int = 15
+    max_queries: int = 4
+    per_provider_results: int = 10
+    bilibili_search_url: str = "https://api.bilibili.com/x/web-interface/search/type"
+    bilibili_web_search_url: str = "https://search.bilibili.com/all"
+    github_api_url: str = "https://api.github.com"
+    github_token_env: str = "GITHUB_TOKEN"
+    searxng_base_url: str = ""
+    use_newapi_query_expansion: bool = False
+    use_newapi_candidate_assessment: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     provider: str
     output_dir: str
     run_dir: str
     newapi: NewApiConfig
     topic_defaults: TopicDefaults
+    search: SearchConfig
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -85,6 +101,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         run_dir=defaults.get("run_dir", "./runs"),
         newapi=NewApiConfig(**{key: newapi_raw[key] for key in required}),
         topic_defaults=topic_defaults,
+        search=_parse_search_config(raw.get("search", {})),
     )
 
 
@@ -111,3 +128,17 @@ def _parse_topic_defaults(raw: Any) -> TopicDefaults:
     if judge_difficulty not in JUDGE_DIFFICULTIES:
         raise ValueError("judge_difficulty 必须是 lenient、standard、strict 或 off")
     return TopicDefaults(budget=budget, cache=cache, judge_difficulty=judge_difficulty)
+
+
+def _parse_search_config(raw: Any) -> SearchConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("search 必须是对象")
+    values = asdict(SearchConfig())
+    values.update({key: value for key, value in raw.items() if key in values})
+    for key in ("cache_ttl_sec", "timeout_sec", "max_queries", "per_provider_results"):
+        if not isinstance(values[key], int) or values[key] <= 0:
+            raise ConfigError(f"search.{key} 必须是正整数")
+    for key in ("use_newapi_query_expansion", "use_newapi_candidate_assessment"):
+        if not isinstance(values[key], bool):
+            raise ConfigError(f"search.{key} 必须是布尔值")
+    return SearchConfig(**values)

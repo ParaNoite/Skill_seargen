@@ -29,6 +29,22 @@ class FakeResponse:
 
 
 class NewApiClientTests(unittest.TestCase):
+    def test_search_intent_and_candidate_assessment_are_schema_limited(self):
+        client = NewApiClient(base_url="https://api.example.test/v1", api_key="secret-key")
+        with patch.object(
+            NewApiClient,
+            "_post_chat_completion_content",
+            side_effect=[
+                json.dumps({"goal": "Godot 导航", "facets": ["NavigationAgent"], "exclusions": ["付费课程"], "queries": ["Godot NavigationAgent 教程"]}),
+                json.dumps({"assessments": [{"candidate_id": "cand-1", "relevance": 120, "matched_facets": ["NavigationAgent"], "reason": "标题直接匹配", "risk_flags": []}]}),
+            ],
+        ):
+            intent = client.build_search_intent("Godot 导航", "technical", "text-model")
+            assessments = client.assess_search_candidates(intent, [{"candidate_id": "cand-1", "title": "Godot NavigationAgent", "summary": "", "source_type": "video"}], "text-model")
+
+        self.assertEqual(intent["queries"], ["Godot NavigationAgent 教程"])
+        self.assertEqual(assessments["cand-1"]["relevance"], 100)
+
     def test_from_config_returns_none_when_api_key_is_missing(self):
         config = NewApiConfig(
             base_url="https://api.example.test/v1",

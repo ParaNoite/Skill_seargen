@@ -26,6 +26,20 @@ CONFIG = {
 
 
 class WebAppTests(unittest.TestCase):
+    def test_topic_search_and_selection_use_shared_service(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            created = app.create_topic("Godot 导航", mode="technical")
+            searched = app.search_topic(created["run_id"], use_fake=True)
+            self.assertEqual(searched["status"], "awaiting_selection")
+            selected = app.select_topic(searched["run_id"], [searched["candidates"][0]["candidate_id"]])
+            self.assertEqual(selected["status"], "processing_sources")
+            self.assertEqual(len(selected["selected_sources"]), 1)
+            self.assertTrue((root / "runs" / created["run_id"] / "topic_package" / "sources.json").exists())
+
     def test_lists_and_reads_existing_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -142,6 +156,36 @@ class WebHttpTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", json.loads(payload))
         self.assertNotIn("SKILL_GATHER_TEST_API_KEY", os.environ)
+
+    def test_topic_endpoints_create_search_and_select_fake_candidates(self):
+        status, _, payload = self.request(
+            "POST",
+            "/api/topics",
+            body=json.dumps({"topic": "Godot 导航", "mode": "technical"}),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 201)
+        run_id = json.loads(payload)["run_id"]
+
+        status, _, payload = self.request(
+            "POST",
+            f"/api/topics/{run_id}/search",
+            body=json.dumps({"fake": True}),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        searched = json.loads(payload)
+        self.assertEqual(searched["status"], "awaiting_selection")
+        candidate_id = searched["candidates"][0]["candidate_id"]
+
+        status, _, payload = self.request(
+            "POST",
+            f"/api/topics/{run_id}/select",
+            body=json.dumps({"candidate_ids": [candidate_id]}),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["status"], "processing_sources")
 
     def test_accepts_api_key_for_current_process_without_echoing_it(self):
         status, _, payload = self.request(

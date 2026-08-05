@@ -2,7 +2,7 @@
 
 `skill_seargen`（search and generate）是一个本地 Python CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并建立主题研究任务的可恢复底座。
 
-当前版本是 v0.3。v0.2 的单视频可靠性与评测能力保持不变；v0.3 新增主题任务、主题包结构、预算与缓存策略，以及可恢复的主题 run。搜索、候选确认和实际多来源处理仍属于后续版本范围。
+当前版本是 v0.4。v0.2 的单视频可靠性与评测能力、v0.3 的主题任务底座保持不变；v0.4 新增 Fake、Bilibili、GitHub 和 SearXNG 搜索 provider、候选去重评分和人工确认。v0.4 只发现和选择来源，不执行后续抓取或多来源处理。
 
 ## 项目文档
 
@@ -91,6 +91,9 @@ skill-gather benchmark-report benchmarks/v0.2-videos.json --runs ./runs
 skill-gather vision-report runs/<full-run> runs/<sampled-run> --expected-fields benchmarks/v0.2-expected-fields.example.json
 skill-gather mvp-check --config configs/skill-gather.example.json
 skill-gather topic create "Godot 导航" --mode technical --runs ./runs
+skill-gather topic search <topic-run-id> --config config.json --runs ./runs --fake
+skill-gather topic candidates <topic-run-id> --runs ./runs
+skill-gather topic select <topic-run-id> <candidate-id> --runs ./runs
 skill-gather topic inspect <topic-run-id> --runs ./runs
 skill-gather topic resume <topic-run-id> --runs ./runs
 ```
@@ -112,6 +115,9 @@ skill-gather topic resume <topic-run-id> --runs ./runs
 - `vision-report`：比较多个视觉实验 run 的远程调用数、耗时和人工定义字段正确率。
 - `mvp-check`：使用 fake clients 离线验证候选包与失败审计两条主分支。
 - `topic create`：创建或恢复普通/技术模式的主题任务，并保存预算、缓存和主题包索引。
+- `topic search`：按模式调用搜索 provider，写入候选、查询审计和 `sources.json`；`--fake` 用于离线验证。
+- `topic candidates`：查看候选 ID、来源类型、质量分、风险和查询来源。
+- `topic select`：显式确认候选来源；v0.4 只保存选择，不触发下载或分析。
 - `topic inspect`：以 JSON 查看主题 run 的阶段、失败信息和将来产物路径。
 - `topic resume`：将失败的主题 run 恢复到失败前的阶段，并保留失败审计信息。
 
@@ -129,9 +135,19 @@ skill-gather video <bilibili-url> --config config.json --vision-mode off --run-v
 
 同一 run 一旦完成阶段，就不能改用不同的 Judge 或视觉参数恢复；必须使用不同的 `--run-variant`，防止实验结果混用旧产物。
 
+### 搜索配置
+
+`configs/skill-gather.example.json` 的 `search` 节包含搜索超时、缓存 TTL、Bilibili JSON 搜索入口及其公开搜索页回退地址、GitHub API 地址和 SearXNG 地址。Bilibili JSON 入口返回 412 时，会只解析公开搜索结果页中的视频卡片，不访问候选视频页；该回退不使用 cookie、登录、浏览器自动化或验证码绕过。GitHub token 可通过 `GITHUB_TOKEN`（或 `github_token_env` 指定的变量）提供，不写入配置或 run。
+
+每次搜索都会先生成可审计的检索意图，再执行 provider 查询、URL/来源检查、去重和排序。默认完全使用确定性规则；`use_newapi_query_expansion` 可让 NewAPI 补充意图侧面和至多两条查询变体，`use_newapi_candidate_assessment` 可批量复核候选元数据并参与排序。两者均为可选增强：无 key、超时或响应无效时自动回退规则结果，且不会声称读取候选页面或观看视频。
+
+普通模式调用 Bilibili + SearXNG，技术模式额外调用 GitHub。未配置 SearXNG 时，真实搜索会明确报配置错误；测试和演示使用 `--fake`。
+
+SearXNG 是独立的 AGPL-3.0 本地服务。本项目只调用其 JSON HTTP 接口，不复制源码、不捆绑镜像。它不需要商业搜索 key，但搜索词会发送给实例启用的上游引擎。
+
 ## 本地 Web 界面
 
-临时 Web 界面覆盖 API key 填写、视频提交、run 列表、处理进度、证据查看、评分查看和 MVP 自检。处理逻辑仍复用 CLI 管线。
+临时 Web 界面覆盖主题创建、fake/真实搜索、候选卡片、风险和质量分、来源确认，以及原有的视频提交、run 列表、处理进度、证据查看、评分查看和 MVP 自检。处理逻辑仍复用同一主题服务层和 CLI 管线。
 
 推荐开发启动入口：
 

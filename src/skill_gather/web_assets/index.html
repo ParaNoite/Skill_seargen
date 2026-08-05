@@ -19,6 +19,29 @@
   </header>
 
   <main class="shell">
+    <section class="topic-panel" aria-labelledby="topic-title">
+      <div class="topic-heading">
+        <div>
+          <p class="eyebrow">主题搜索</p>
+          <h1 id="topic-title">先找来源，再确认处理</h1>
+        </div>
+        <form id="topic-form" class="topic-form">
+          <input id="topic-input" name="topic" type="text" placeholder="例如：Godot 导航" required>
+          <select id="topic-mode" name="mode" aria-label="主题模式">
+            <option value="normal">普通模式</option>
+            <option value="technical">技术模式</option>
+          </select>
+          <label class="check-label"><input id="topic-fake" name="fake" type="checkbox"> 离线 fake</label>
+          <button class="button primary" type="submit">创建主题</button>
+        </form>
+      </div>
+      <p id="topic-message" class="form-message" role="status"></p>
+      <div class="topic-workspace">
+        <aside id="topics-list" class="topics-list" aria-live="polite"><div class="loading compact">还没有主题任务。</div></aside>
+        <section id="topic-detail" class="topic-detail" aria-live="polite"><div class="muted">创建主题后，这里会显示候选来源。</div></section>
+      </div>
+    </section>
+
     <section class="submit-panel" aria-labelledby="submit-title">
       <div>
         <p class="eyebrow">新建采集任务</p>

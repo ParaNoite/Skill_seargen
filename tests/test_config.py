@@ -95,6 +95,25 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.topic_defaults.cache.reuse_cache)
         self.assertEqual(config.topic_defaults.judge_difficulty, "strict")
 
+    def test_parses_search_defaults_and_provider_overrides(self):
+        raw = {
+            **VALID_CONFIG,
+            "search": {
+                "searxng_base_url": "http://127.0.0.1:8080",
+                "github_token_env": "TEST_GITHUB_TOKEN",
+                "cache_ttl_sec": 120,
+            },
+        }
+        config = parse_config(raw)
+        self.assertEqual(config.search.searxng_base_url, "http://127.0.0.1:8080")
+        self.assertEqual(config.search.bilibili_web_search_url, "https://search.bilibili.com/all")
+        self.assertEqual(config.search.github_token_env, "TEST_GITHUB_TOKEN")
+        self.assertEqual(config.search.cache_ttl_sec, 120)
+
+    def test_rejects_invalid_search_cache_ttl(self):
+        with self.assertRaises(ConfigError):
+            parse_config({**VALID_CONFIG, "search": {"cache_ttl_sec": 0}})
+
     def test_rejects_invalid_topic_budget(self):
         raw = {**VALID_CONFIG, "topic_defaults": {"max_candidates": 0}}
 

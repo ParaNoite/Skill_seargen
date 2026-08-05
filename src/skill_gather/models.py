@@ -229,6 +229,19 @@ class TopicSourceCandidate:
     query: str = ""
     relevance_reason: str = ""
     risk_flags: list[str] = field(default_factory=list)
+    candidate_id: str = ""
+    canonical_url: str = ""
+    host: str = ""
+    quality_score: int = 0
+    providers: list[str] = field(default_factory=list)
+    engines: list[str] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    duplicate_count: int = 0
+    matched_facets: list[str] = field(default_factory=list)
+    score_breakdown: dict[str, int] = field(default_factory=dict)
+    assessment_source: str = "rule"
+    selected: bool = False
+    confirmed_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

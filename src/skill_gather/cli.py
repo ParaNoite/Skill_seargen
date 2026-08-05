@@ -22,6 +22,7 @@ from .mvp_check import run_mvp_check
 from .pipeline import PipelineConfigurationError, run_video_pipeline
 from .reports import build_reliability_report, build_vision_report
 from .runs import RunStore, read_json, write_json
+from .search import SearchProviderError, search_topic
 from .source import SourceInferenceError, infer_source
 from .topics import TopicRunStore
 
@@ -93,6 +94,24 @@ def build_parser() -> argparse.ArgumentParser:
     topic_resume.add_argument("run_id")
     topic_resume.add_argument("--runs", default="./runs", help="主题 run 状态目录")
     topic_resume.set_defaults(handler=handle_topic_resume)
+
+    topic_search = topic_commands.add_parser("search", help="搜索主题候选来源")
+    topic_search.add_argument("run_id")
+    topic_search.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_search.add_argument("--config", default="config.json", help="配置文件路径")
+    topic_search.add_argument("--fake", action="store_true", help="使用离线 fake 搜索 provider")
+    topic_search.set_defaults(handler=handle_topic_search)
+
+    topic_candidates = topic_commands.add_parser("candidates", help="列出主题候选来源")
+    topic_candidates.add_argument("run_id")
+    topic_candidates.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_candidates.set_defaults(handler=handle_topic_candidates)
+
+    topic_select = topic_commands.add_parser("select", help="确认主题候选来源")
+    topic_select.add_argument("run_id")
+    topic_select.add_argument("candidate_ids", nargs="+", help="一个或多个候选 ID")
+    topic_select.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_select.set_defaults(handler=handle_topic_select)
 
     score = subcommands.add_parser("score", help="读取 skill 包评分")
     score.add_argument("skill_dir")
@@ -311,6 +330,72 @@ def handle_topic_resume(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
         print(str(exc), file=stderr)
         return 1
 
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_topic_search(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    store = TopicRunStore(args.runs)
+    try:
+        task = store.begin_search(args.run_id)
+        config = load_config(args.config)
+        candidates, batches, query_audit, intent = search_topic(
+            task,
+            config,
+            cache_path=Path(args.runs) / "search_cache.sqlite3",
+            use_fake=args.fake,
+        )
+        warnings = [
+            f"{batch.provider}: {warning}"
+            for batch in batches
+            for warning in batch.warnings
+        ]
+        task = store.save_search_results(
+            args.run_id,
+            candidates,
+            search_audit={
+                "topic": task.topic,
+                "mode": task.mode,
+                "intent": intent.to_dict(),
+                "queries": query_audit,
+                "batches": [batch.to_dict() for batch in batches],
+            },
+            warnings=warnings,
+        )
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError, ValueError, SearchProviderError) as exc:
+        try:
+            store.fail(args.run_id, str(exc))
+        except (FileNotFoundError, ValueError):
+            pass
+        print(str(exc), file=stderr)
+        return 2
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    return 0 if task.status == "awaiting_selection" else 1
+
+
+def handle_topic_candidates(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        task = TopicRunStore(args.runs).load(args.run_id)
+    except FileNotFoundError as exc:
+        print(str(exc), file=stderr)
+        return 1
+    payload = {
+        "run_id": task.run_id,
+        "topic": task.topic,
+        "status": task.status,
+        "candidates": [candidate.to_dict() for candidate in task.candidates],
+        "selected_sources": [candidate.to_dict() for candidate in task.selected_sources],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    return 0
+
+
+def handle_topic_select(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        task = TopicRunStore(args.runs).select_candidates(args.run_id, args.candidate_ids)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
     return 0
 

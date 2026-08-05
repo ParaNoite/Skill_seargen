@@ -48,6 +48,15 @@ _SAFE_RESPONSE_FIELDS = {
     "claim",
     "raw_excerpt",
     "confidence",
+    "goal",
+    "facets",
+    "exclusions",
+    "queries",
+    "assessments",
+    "candidate_id",
+    "relevance",
+    "matched_facets",
+    "reason",
 }
 
 
@@ -229,6 +238,19 @@ def _truncate_text(value: Any, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 1].rstrip() + "…"
+
+
+def _short_text_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = _truncate_text(item, max_chars)
+        if text and text not in result:
+            result.append(text)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def resolve_api_key(api_key_env_or_value: str) -> str:
@@ -450,6 +472,127 @@ class NewApiClient:
             "observations": result["observations"],
             "returncode": 0,
         }
+
+    def expand_search_queries(self, topic: str, mode: str, model: str) -> list[str]:
+        prompt = (
+            "Return only JSON with a queries array. Expand this research topic into at most two short, "
+            "auditable search queries. Keep the original meaning, do not invent entities or URLs, and "
+            "use Chinese plus an English variant only when useful. "
+            f"Mode: {mode}. Topic: {topic}"
+        )
+        content = self._post_chat_completion_content(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+            },
+            operation="search_query_expansion",
+            http_error_code="search_query_expansion_failed",
+            unreachable_code="search_query_expansion_unreachable",
+        )
+        try:
+            result = _json_object_from_content(content)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise NewApiError(
+                "newapi returned invalid search query JSON",
+                code="invalid_search_query_json",
+                response_excerpt=content,
+            ) from exc
+        queries = result.get("queries") if isinstance(result, dict) else None
+        if not isinstance(queries, list):
+            raise NewApiError(
+                "newapi returned invalid search query shape",
+                code="invalid_search_query_shape",
+                response_excerpt=content,
+            )
+        normalized = [str(query).strip() for query in queries if str(query).strip()]
+        if len(normalized) > 2:
+            normalized = normalized[:2]
+        return normalized
+
+    def build_search_intent(self, topic: str, mode: str, model: str) -> dict[str, Any]:
+        prompt = (
+            "Return only JSON with goal, facets, exclusions, and queries arrays. Interpret the user's "
+            "research topic for public-source discovery. Keep the original meaning, do not invent entities, "
+            "URLs, or facts. Provide at most 3 short facets, 3 exclusions, and 2 query variants. "
+            "Mode: " + mode + ". Topic: " + topic
+        )
+        content = self._post_chat_completion_content(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+            },
+            operation="search_intent",
+            http_error_code="search_intent_failed",
+            unreachable_code="search_intent_unreachable",
+        )
+        try:
+            result = _json_object_from_content(content)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise NewApiError("newapi returned invalid search intent JSON", code="invalid_search_intent_json", response_excerpt=content) from exc
+        if not isinstance(result, dict):
+            raise NewApiError("newapi returned invalid search intent shape", code="invalid_search_intent_shape", response_excerpt=content)
+        return {
+            "goal": _truncate_text(result.get("goal", ""), 240),
+            "facets": _short_text_list(result.get("facets"), limit=3, max_chars=80),
+            "exclusions": _short_text_list(result.get("exclusions"), limit=3, max_chars=80),
+            "queries": _short_text_list(result.get("queries"), limit=2, max_chars=120),
+        }
+
+    def assess_search_candidates(self, intent: dict[str, Any], candidates: list[dict[str, Any]], model: str) -> dict[str, dict[str, Any]]:
+        compact_candidates = [
+            {
+                "candidate_id": str(candidate.get("candidate_id", "")),
+                "title": _truncate_text(candidate.get("title", ""), 180),
+                "summary": _truncate_text(candidate.get("summary", ""), 280),
+                "source_type": str(candidate.get("source_type", "")),
+            }
+            for candidate in candidates[:20]
+            if str(candidate.get("candidate_id", ""))
+        ]
+        prompt = (
+            "Return only JSON with an assessments array. Assess each candidate only from its supplied title, "
+            "summary, and source type against the intent. Never claim to have opened a URL or watched a video. "
+            "Each item: candidate_id, relevance (0-100 integer), matched_facets (max 3 strings), reason (max 120 chars), risk_flags (max 3 strings).\n\n"
+            f"Intent: {json.dumps(intent, ensure_ascii=False)}\nCandidates: {json.dumps(compact_candidates, ensure_ascii=False)}"
+        )
+        content = self._post_chat_completion_content(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+            },
+            operation="search_candidate_assessment",
+            http_error_code="search_candidate_assessment_failed",
+            unreachable_code="search_candidate_assessment_unreachable",
+        )
+        try:
+            result = _json_object_from_content(content)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise NewApiError("newapi returned invalid candidate assessment JSON", code="invalid_candidate_assessment_json", response_excerpt=content) from exc
+        items = result.get("assessments") if isinstance(result, dict) else None
+        if not isinstance(items, list):
+            raise NewApiError("newapi returned invalid candidate assessment shape", code="invalid_candidate_assessment_shape", response_excerpt=content)
+        allowed_ids = {item["candidate_id"] for item in compact_candidates}
+        assessments: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            candidate_id = str(item.get("candidate_id", "")).strip()
+            if candidate_id not in allowed_ids or candidate_id in assessments:
+                continue
+            try:
+                relevance = int(item.get("relevance", 0))
+            except (TypeError, ValueError):
+                relevance = 0
+            assessments[candidate_id] = {
+                "relevance": max(0, min(100, relevance)),
+                "matched_facets": _short_text_list(item.get("matched_facets"), limit=3, max_chars=80),
+                "reason": _truncate_text(item.get("reason", ""), 120),
+                "risk_flags": _short_text_list(item.get("risk_flags"), limit=3, max_chars=60),
+            }
+        return assessments
 
     def distill_skill(
         self,

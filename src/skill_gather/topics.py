@@ -9,6 +9,7 @@ from .models import (
     TopicBudget,
     TopicCachePolicy,
     TopicPackage,
+    TopicSourceCandidate,
     TopicTask,
     TopicUsage,
 )
@@ -138,6 +139,113 @@ class TopicRunStore:
             task.status = "failed"
             task.failure_stage = task.current_stage
             task.failure_reason = f"预算超限：{violation}"
+        self.save(task)
+        return task
+
+    def begin_search(self, run_id: str) -> TopicTask:
+        task = self.load(run_id)
+        if task.status not in {"created", "searching", "awaiting_selection"}:
+            raise ValueError(f"当前状态 {task.status} 不能开始搜索")
+        task.status = "searching"
+        task.current_stage = "searching"
+        task.failure_reason = None
+        task.failure_stage = None
+        self.save(task)
+        return task
+
+    def save_search_results(
+        self,
+        run_id: str,
+        candidates: list[TopicSourceCandidate],
+        *,
+        search_audit: dict,
+        warnings: list[str],
+    ) -> TopicTask:
+        task = self.load(run_id)
+        if task.status != "searching":
+            raise ValueError("主题任务不在搜索阶段")
+        task.candidates = candidates
+        task.selected_sources = []
+        task.usage = TopicUsage(
+            candidate_count=len(candidates),
+            selected_source_count=0,
+            processed_video_duration_sec=task.usage.processed_video_duration_sec,
+            model_calls=task.usage.model_calls,
+            estimated_cost_usd=task.usage.estimated_cost_usd,
+            elapsed_runtime_sec=task.usage.elapsed_runtime_sec,
+        )
+        package = task.package
+        if package is None:
+            raise ValueError("主题任务缺少主题包索引")
+        root = self.run_path(run_id)
+        sources_path = root / package.sources
+        write_json(
+            sources_path,
+            {
+                "topic": task.topic,
+                "candidates": [candidate.to_dict() for candidate in candidates],
+                "selected_sources": [],
+                "warnings": warnings,
+            },
+        )
+        audit_path = root / "search_audit.json"
+        write_json(audit_path, search_audit)
+        task.artifacts["search_audit"] = "search_audit.json"
+        task.artifacts["search_warnings"] = " | ".join(warnings)
+        if not candidates:
+            task.status = "failed"
+            task.current_stage = "searching"
+            task.failure_stage = "searching"
+            task.failure_reason = "所有搜索 provider 均未返回可用候选"
+        else:
+            task.status = "awaiting_selection"
+            task.current_stage = "awaiting_selection"
+        self.save(task)
+        return task
+
+    def select_candidates(self, run_id: str, candidate_ids: list[str]) -> TopicTask:
+        task = self.load(run_id)
+        if task.status != "awaiting_selection":
+            raise ValueError("只有等待选择的主题任务可以确认候选")
+        selected_ids = list(dict.fromkeys(candidate_id.strip() for candidate_id in candidate_ids if candidate_id.strip()))
+        if not selected_ids:
+            raise ValueError("至少选择一个候选来源")
+        if len(selected_ids) > task.budget.max_selected_sources:
+            raise ValueError(f"最多只能选择 {task.budget.max_selected_sources} 个来源")
+        candidates = {candidate.candidate_id: candidate for candidate in task.candidates}
+        unknown = [candidate_id for candidate_id in selected_ids if candidate_id not in candidates]
+        if unknown:
+            raise ValueError(f"找不到候选来源：{', '.join(unknown)}")
+        confirmed_at = datetime.now(UTC).isoformat()
+        selected: list[TopicSourceCandidate] = []
+        for candidate in task.candidates:
+            candidate.selected = candidate.candidate_id in selected_ids
+            candidate.confirmed_at = confirmed_at if candidate.selected else None
+            if candidate.selected:
+                selected.append(candidate)
+        task.selected_sources = selected
+        task.usage = TopicUsage(
+            candidate_count=len(task.candidates),
+            selected_source_count=len(selected),
+            processed_video_duration_sec=task.usage.processed_video_duration_sec,
+            model_calls=task.usage.model_calls,
+            estimated_cost_usd=task.usage.estimated_cost_usd,
+            elapsed_runtime_sec=task.usage.elapsed_runtime_sec,
+        )
+        package = task.package
+        if package is None:
+            raise ValueError("主题任务缺少主题包索引")
+        write_json(
+            self.run_path(run_id) / package.sources,
+            {
+                "topic": task.topic,
+                "candidates": [candidate.to_dict() for candidate in task.candidates],
+                "selected_sources": [candidate.to_dict() for candidate in selected],
+                "warnings": task.artifacts.get("search_warnings", "").split(" | ") if task.artifacts.get("search_warnings") else [],
+            },
+        )
+        task.status = "processing_sources"
+        task.current_stage = "processing_sources"
         self.save(task)
         return task
 

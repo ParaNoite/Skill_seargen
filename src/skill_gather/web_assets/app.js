@@ -7,8 +7,13 @@ const statusNames = { created: "排队中", running: "处理中", completed: "�
 const difficultyNames = { lenient: "宽松", standard: "标准", strict: "严格", off: "关闭 Judge" };
 
 const state = { runs: [], selectedId: null, timer: null };
+const topicState = { topics: [], selectedId: null };
 const runsList = document.querySelector("#runs-list");
 const detailPanel = document.querySelector("#detail-panel");
+const topicsList = document.querySelector("#topics-list");
+const topicDetail = document.querySelector("#topic-detail");
+const topicForm = document.querySelector("#topic-form");
+const topicMessage = document.querySelector("#topic-message");
 const form = document.querySelector("#video-form");
 const formMessage = document.querySelector("#form-message");
 const submitButton = document.querySelector("#submit-button");
@@ -50,6 +55,84 @@ function renderEmptyDetail() {
       <h2>选择一条处理记录</h2>
       <p>状态、评分与证据摘要会显示在这里。</p>
     </div>`;
+}
+
+async function loadTopics(selectFirst = false) {
+  if (!topicsList) return;
+  try {
+    topicState.topics = (await request("/api/topics")).topics || [];
+    renderTopics();
+    if (topicState.topics.length && (selectFirst || !topicState.selectedId)) {
+      selectTopic(topicState.topics[0].run_id);
+    } else if (!topicState.topics.length) {
+      topicState.selectedId = null;
+      topicDetail.innerHTML = '<div class="muted">创建主题后，这里会显示候选来源。</div>';
+    }
+  } catch (error) {
+    topicsList.innerHTML = `<div class="loading">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderTopics() {
+  if (!topicState.topics.length) {
+    topicsList.innerHTML = '<div class="loading compact">还没有主题任务。</div>';
+    return;
+  }
+  const labels = { created: "未搜索", searching: "搜索中", awaiting_selection: "待确认", processing_sources: "已确认", failed: "失败" };
+  topicsList.innerHTML = topicState.topics.map(topic => `
+    <button class="topic-item ${topic.run_id === topicState.selectedId ? "active" : ""}" type="button" data-topic-id="${escapeHtml(topic.run_id)}">
+      <div class="topic-item-title">${escapeHtml(topic.topic)}</div>
+      <div class="topic-item-meta">${escapeHtml(topic.mode)} · ${escapeHtml(labels[topic.status] || topic.status)} · ${Number(topic.candidate_count) || 0} 条候选</div>
+    </button>`).join("");
+  topicsList.querySelectorAll("[data-topic-id]").forEach(button => button.addEventListener("click", () => selectTopic(button.dataset.topicId)));
+}
+
+async function selectTopic(runId) {
+  topicState.selectedId = runId;
+  renderTopics();
+  topicDetail.innerHTML = '<div class="loading compact">正在读取主题...</div>';
+  try { renderTopic(await request(`/api/topics/${encodeURIComponent(runId)}`)); }
+  catch (error) { topicDetail.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
+}
+
+function renderTopic(topic) {
+  const candidates = topic.candidates || [];
+  const selectedSources = topic.selected_sources || [];
+  const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
+  const selectButton = topic.status === "awaiting_selection" && candidates.length ? '<button id="topic-select-button" class="button primary" type="button">确认选择</button>' : "";
+  const confirmation = topic.status === "processing_sources" ? `
+    <section class="topic-confirmation" aria-live="polite">
+      <div><strong>已确认 ${selectedSources.length} 条来源</strong><span>来源清单已保存到 topic_package/sources.json</span></div>
+      <span class="status completed">等待后续处理</span>
+      <ul>${selectedSources.map(source => `<li>${escapeHtml(source.title || source.url)}</li>`).join("")}</ul>
+    </section>` : "";
+  topicDetail.innerHTML = `
+    <div class="topic-actions">${searchButton}${selectButton}<span class="muted">${escapeHtml(topic.status)}</span></div>
+    ${confirmation}
+    ${candidates.length ? `<div class="candidate-list">${candidates.map(candidate => `
+      <label class="candidate-card"><input type="checkbox" value="${escapeHtml(candidate.candidate_id)}" ${candidate.selected ? "checked" : ""} ${topic.status !== "awaiting_selection" ? "disabled" : ""}>
+        <span><span class="candidate-title">${escapeHtml(candidate.title || candidate.url)}</span><span class="candidate-summary">${escapeHtml(candidate.summary || "暂无摘要")}</span><span class="candidate-meta">${escapeHtml(candidate.source_type)} · ${escapeHtml(candidate.host)} · ${escapeHtml((candidate.providers || []).join(", "))}</span><span class="candidate-meta">${escapeHtml(candidate.relevance_reason || "")}${(candidate.risk_flags || []).length ? ` · 风险：${escapeHtml(candidate.risk_flags.join(", "))}` : ""}</span></span>
+        <span class="candidate-score">${Number(candidate.quality_score) || 0}</span>
+      </label>`).join("")}</div>` : '<p class="muted">当前没有候选来源。</p>'}`;
+  const searchButtonNode = document.querySelector("#topic-search-button");
+  if (searchButtonNode) searchButtonNode.addEventListener("click", async () => {
+    searchButtonNode.disabled = true;
+    searchButtonNode.textContent = "搜索中...";
+    try {
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/search`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fake: document.querySelector("#topic-fake")?.checked || false }) });
+      await loadTopics();
+      await selectTopic(topic.run_id);
+    } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; searchButtonNode.disabled = false; searchButtonNode.textContent = "搜索候选"; }
+  });
+  const selectButtonNode = document.querySelector("#topic-select-button");
+  if (selectButtonNode) selectButtonNode.addEventListener("click", async () => {
+    const candidateIds = [...topicDetail.querySelectorAll("input[type=checkbox]:checked")].map(input => input.value);
+    try {
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/select`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ candidate_ids: candidateIds }) });
+      await loadTopics();
+      await selectTopic(topic.run_id);
+    } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; }
+  });
 }
 
 function renderModels(payload) {
@@ -206,10 +289,26 @@ form.addEventListener("submit", async event => {
   }
 });
 
+topicForm?.addEventListener("submit", async event => {
+  event.preventDefault();
+  topicMessage.className = "form-message";
+  topicMessage.textContent = "正在创建主题...";
+  try {
+    const result = await request("/api/topics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ topic: topicForm.elements.topic.value, mode: topicForm.elements.mode.value }) });
+    topicForm.elements.topic.value = "";
+    topicMessage.textContent = "主题已创建，请在右侧启动搜索。";
+    topicState.selectedId = result.run_id;
+    await loadTopics();
+    await selectTopic(result.run_id);
+  } catch (error) { topicMessage.className = "form-message error"; topicMessage.textContent = error.message; }
+});
+
 document.querySelector("#refresh-button").addEventListener("click", async () => {
   await loadRuns();
   if (state.selectedId) await selectRun(state.selectedId);
 });
+
+loadTopics();
 
 modelsButton.addEventListener("click", async () => {
   modelsButton.disabled = true;

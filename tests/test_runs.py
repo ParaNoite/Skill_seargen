@@ -65,6 +65,16 @@ class RunStoreTests(unittest.TestCase):
             self.assertEqual(resumed.failure_reason, "预算已耗尽")
             self.assertIsInstance(restored, TopicTask)
 
+    def test_search_can_retry_after_resume_from_searching(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(temp_dir)
+            task = store.start_or_resume("重试搜索")
+            store.advance(task.run_id, "searching")
+            store.fail(task.run_id, "provider timeout")
+            resumed = store.resume(task.run_id)
+            retried = store.begin_search(resumed.run_id)
+            self.assertEqual(retried.status, "searching")
+
     def test_topic_run_distinguishes_modes_for_the_same_topic(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TopicRunStore(temp_dir)

@@ -24,5 +24,18 @@
     "reuse_cache": true,
     "refresh_cache": false,
     "judge_difficulty": "standard"
+  },
+  "search": {
+    "cache_ttl_sec": 86400,
+    "timeout_sec": 15,
+    "max_queries": 4,
+    "per_provider_results": 10,
+    "bilibili_search_url": "https://api.bilibili.com/x/web-interface/search/type",
+    "bilibili_web_search_url": "https://search.bilibili.com/all",
+    "github_api_url": "https://api.github.com",
+    "github_token_env": "GITHUB_TOKEN",
+    "searxng_base_url": "",
+    "use_newapi_query_expansion": false,
+    "use_newapi_candidate_assessment": false
   }
 }

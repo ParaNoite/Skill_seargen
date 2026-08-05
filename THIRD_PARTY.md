@@ -9,6 +9,9 @@
 | faster-whisper | 本地必需 ASR 转写后端 | python-dependency | https://github.com/SYSTRAN/faster-whisper | `>=1.1,<2` | MIT | 否 | 通过项目依赖安装；模型权重不入仓 |
 | PySceneDetect | 场景变化检测 | python-dependency / external-tool | https://github.com/Breakthrough/PySceneDetect | 待固定 | BSD-3-Clause | 否 | 后续进入 `pyproject.toml` |
 | newapi | 云端视觉、蒸馏和 judge | external-service | https://api.renice.cc/ | 配置文件指定 | 服务侧 | 否 | API key 只从环境变量读取 |
+| SearXNG | 本地多引擎通用搜索 | independent-service / HTTP JSON | https://github.com/searxng/searxng | 用户部署版本；不得用浮动 tag 作为发布标识 | AGPL-3.0 | 否 | v0.4 只调用 `/search?format=json`；不复制源码、不捆绑镜像 |
+| GitHub REST API | 技术模式公开仓库候选发现 | external-service / HTTP JSON | https://docs.github.com/en/rest/search/search | API 版本由请求头/官方接口决定 | GitHub 服务条款 | 否 | 默认无 token；可选 `GITHUB_TOKEN` 只用于提高配额 |
+| Bilibili public search endpoint | 普通/技术主题视频候选发现 | external-service / HTTP JSON | https://www.bilibili.com/ | 公共接口行为可能变化 | 平台服务 | 否 | v0.4 不使用 cookie、登录、浏览器自动化或验证码绕过 |
 | kangarooking/cangjie-skill | RIA++ skill 蒸馏参考 | reference-only | 待补充 | 待确认 | 待确认 | 否 | 许可证确认前只参考，不复制 |
 
 新增第三方前必须补齐：

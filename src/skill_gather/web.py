@@ -20,8 +20,10 @@ from .integrations.newapi import resolve_api_key
 from .models import PIPELINE_STAGES
 from .mvp_check import run_mvp_check
 from .runs import RunStore, read_json, safe_slug
+from .search import search_topic as execute_topic_search
 from .source import infer_source
 from .scoring import normalize_judge_difficulty
+from .topics import TopicRunStore
 
 
 class WebApp:
@@ -30,6 +32,7 @@ class WebApp:
         self.runs_path = runs
         self.out_path = out
         self.store = RunStore(runs)
+        self.topic_store = TopicRunStore(runs)
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
@@ -52,6 +55,72 @@ class WebApp:
                 continue
             result.append(self._run_summary(state, manifest))
         return result
+
+    def list_topics(self) -> list[dict[str, Any]]:
+        if not self.topic_store.root.exists():
+            return []
+        result: list[dict[str, Any]] = []
+        for state_path in sorted(
+            self.topic_store.root.glob("*/topic_state.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                task = self.topic_store.load(state_path.parent.name)
+            except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+                continue
+            result.append(self._topic_summary(task.to_dict()))
+        return result
+
+    def get_topic(self, run_id: str) -> dict[str, Any]:
+        if not run_id or safe_slug(run_id) != run_id:
+            raise FileNotFoundError("无效的主题 run id")
+        return self.topic_store.load(run_id).to_dict()
+
+    def create_topic(self, topic: str, *, mode: str = "normal", config_path: str | None = None) -> dict[str, Any]:
+        topic = topic.strip()
+        if not topic:
+            raise ValueError("请输入研究主题")
+        config = load_config(config_path or self.config_path)
+        task = self.topic_store.start_or_resume(
+            topic=topic,
+            mode=mode,
+            budget=config.topic_defaults.budget,
+            cache=config.topic_defaults.cache,
+            judge_difficulty=config.topic_defaults.judge_difficulty,
+        )
+        return task.to_dict()
+
+    def search_topic(self, run_id: str, *, use_fake: bool = False, config_path: str | None = None) -> dict[str, Any]:
+        config = load_config(config_path or self.config_path)
+        task = self.topic_store.begin_search(run_id)
+        candidates, batches, query_audit, intent = execute_topic_search(
+            task,
+            config,
+            cache_path=Path(self.runs_path) / "search_cache.sqlite3",
+            use_fake=use_fake,
+        )
+        warnings = [
+            f"{batch.provider}: {warning}"
+            for batch in batches
+            for warning in batch.warnings
+        ]
+        task = self.topic_store.save_search_results(
+            run_id,
+            candidates,
+            search_audit={
+                "topic": task.topic,
+                "mode": task.mode,
+                "intent": intent.to_dict(),
+                "queries": query_audit,
+                "batches": [batch.to_dict() for batch in batches],
+            },
+            warnings=warnings,
+        )
+        return task.to_dict()
+
+    def select_topic(self, run_id: str, candidate_ids: list[str]) -> dict[str, Any]:
+        return self.topic_store.select_candidates(run_id, candidate_ids).to_dict()
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         if not run_id or safe_slug(run_id) != run_id:
@@ -206,6 +275,18 @@ class WebApp:
         }
 
     @staticmethod
+    def _topic_summary(state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": state.get("run_id", ""),
+            "topic": state.get("topic", ""),
+            "mode": state.get("mode", "normal"),
+            "status": state.get("status", "created"),
+            "candidate_count": len(state.get("candidates", [])),
+            "selected_source_count": len(state.get("selected_sources", [])),
+            "updated_at": state.get("updated_at", ""),
+        }
+
+    @staticmethod
     def _optional_json(path: Path) -> dict[str, Any]:
         if not path.exists():
             return {}
@@ -245,6 +326,18 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             path = urlsplit(self.path).path
             if path == "/api/runs":
                 self._send_json({"runs": app.list_runs()})
+                return
+            if path == "/api/topics":
+                self._send_json({"topics": app.list_topics()})
+                return
+            if path.startswith("/api/topics/"):
+                run_id = unquote(path.removeprefix("/api/topics/"))
+                try:
+                    payload = app.get_topic(run_id)
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._send_json(payload)
                 return
             if path.startswith("/api/runs/"):
                 run_id = unquote(path.removeprefix("/api/runs/"))
@@ -294,6 +387,29 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     )
                     self._send_json(result, HTTPStatus.ACCEPTED)
                     return
+                if path == "/api/topics":
+                    result = app.create_topic(
+                        str(body.get("topic", "")),
+                        mode=str(body.get("mode", "normal")),
+                        config_path=str(body.get("config", "")) or None,
+                    )
+                    self._send_json(result, HTTPStatus.CREATED)
+                    return
+                if path.startswith("/api/topics/"):
+                    suffix = path.removeprefix("/api/topics/")
+                    if suffix.endswith("/search"):
+                        run_id = suffix.removesuffix("/search").strip("/")
+                        result = app.search_topic(run_id, use_fake=bool(body.get("fake", False)), config_path=str(body.get("config", "")) or None)
+                        self._send_json(result, HTTPStatus.OK)
+                        return
+                    if suffix.endswith("/select"):
+                        run_id = suffix.removesuffix("/select").strip("/")
+                        candidate_ids = body.get("candidate_ids", [])
+                        if not isinstance(candidate_ids, list):
+                            raise ValueError("candidate_ids 必须是数组")
+                        result = app.select_topic(run_id, [str(value) for value in candidate_ids])
+                        self._send_json(result, HTTPStatus.OK)
+                        return
                 if path == "/api/mvp-check":
                     self._send_json(app.run_mvp_check(str(body.get("api_key", ""))))
                     return
