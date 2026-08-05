@@ -111,6 +111,8 @@ def run_video_pipeline(
     judge_difficulty: str = "standard",
     vision_mode: str = "full",
     vision_frame_limit: int = 12,
+    evidence_only: bool = False,
+    pre_media_extract: Callable[[VideoSourceManifest], str | None] | None = None,
 ) -> RunState:
     normalized_difficulty = normalize_judge_difficulty(judge_difficulty)
     normalized_vision_mode = vision_mode if vision_mode in {"full", "sampled", "off"} else "full"
@@ -151,6 +153,18 @@ def run_video_pipeline(
         "manifest",
         lambda: _probe_manifest(store, state, manifest, probe),
     )
+    if pre_media_extract is not None:
+        current_manifest = VideoSourceManifest.from_dict(read_json(store.manifest_path(state.run_id)))
+        try:
+            rejection_reason = pre_media_extract(current_manifest)
+        except Exception as exc:
+            rejection_reason = f"主题视频预检失败：{type(exc).__name__}: {exc}"
+        if rejection_reason:
+            state.status = "failed"
+            state.current_stage = "manifest"
+            state.failure_reason = rejection_reason
+            store.save(state)
+            return state
     _run_regular_stage(
         store,
         state,
@@ -183,6 +197,12 @@ def run_video_pipeline(
         ),
     )
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
+    if evidence_only:
+        state.status = "completed"
+        state.current_stage = "timeline_merge"
+        state.failure_reason = None
+        store.save(state)
+        return state
     _run_regular_stage(
         store,
         state,

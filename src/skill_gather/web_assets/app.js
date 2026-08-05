@@ -24,6 +24,11 @@ function escapeHtml(value = "") {
   return String(value).replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }
 
+function displayVisionReason(reason) {
+  if (reason === "newapi API key is not configured") return "未配置 NewAPI API key";
+  return reason;
+}
+
 async function request(path, options = {}) {
   const response = await fetch(path, options);
   const payload = await response.json().catch(() => ({}));
@@ -78,7 +83,7 @@ function renderTopics() {
     topicsList.innerHTML = '<div class="loading compact">还没有主题任务。</div>';
     return;
   }
-  const labels = { created: "未搜索", searching: "搜索中", awaiting_selection: "待确认", processing_sources: "已确认", failed: "失败" };
+  const labels = { created: "未搜索", searching: "搜索中", awaiting_selection: "待确认", processing_sources: "处理中", generating: "生成中", scoring: "评分中", completed: "已完成", failed: "失败" };
   topicsList.innerHTML = topicState.topics.map(topic => `
     <button class="topic-item ${topic.run_id === topicState.selectedId ? "active" : ""}" type="button" data-topic-id="${escapeHtml(topic.run_id)}">
       <div class="topic-item-title">${escapeHtml(topic.topic)}</div>
@@ -98,17 +103,34 @@ async function selectTopic(runId) {
 function renderTopic(topic) {
   const candidates = topic.candidates || [];
   const selectedSources = topic.selected_sources || [];
+  const videoRuns = topic.video_runs || [];
+  const job = topic.job || {};
   const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
   const selectButton = topic.status === "awaiting_selection" && candidates.length ? '<button id="topic-select-button" class="button primary" type="button">确认选择</button>' : "";
+  const processButton = topic.status === "processing_sources" && !job.active ? '<button id="topic-process-button" class="button primary" type="button">开始处理已选来源</button>' : "";
+  const processControls = topic.status === "processing_sources" && !job.active ? `
+    <label class="topic-inline-control">视觉模式<select id="topic-vision-mode"><option value="off">关闭</option><option value="sampled" selected>抽样</option><option value="full">全量</option></select></label>
+    <label class="topic-inline-control">视觉帧数<input id="topic-vision-frame-limit" type="number" min="1" max="120" value="12"></label>` : "";
+  const jobStatus = job.active ? `<span class="status running">${escapeHtml(job.status === "queued" ? "排队中" : "处理中")}</span>` : (job.error ? `<span class="notice compact-notice">${escapeHtml(job.error)}</span>` : "");
+  const videoRunSummary = videoRuns.length ? `<div class="topic-video-runs"><strong>视频子 run</strong>${videoRuns.map(run => `<span>${escapeHtml(run.candidate_id)} · ${escapeHtml(run.status)}${run.vision_status ? ` · 视觉：${escapeHtml(run.vision_status)}${run.vision_reason ? `（${escapeHtml(displayVisionReason(run.vision_reason))}）` : ""}` : ""}${run.failure_reason ? ` · ${escapeHtml(run.failure_reason)}` : ""}</span>`).join("")}</div>` : "";
   const confirmation = topic.status === "processing_sources" ? `
     <section class="topic-confirmation" aria-live="polite">
-      <div><strong>已确认 ${selectedSources.length} 条来源</strong><span>来源清单已保存到 topic_package/sources.json</span></div>
-      <span class="status completed">等待后续处理</span>
+      <div><strong>已确认 ${selectedSources.length} 条来源</strong><span>网页会生成知识总结，公开视频会写入主题证据。</span></div>
+      <div class="topic-processing-controls">${processControls}${processButton}${jobStatus}</div>
       <ul>${selectedSources.map(source => `<li>${escapeHtml(source.title || source.url)}</li>`).join("")}</ul>
+      ${videoRunSummary}
+    </section>` : "";
+  const outcome = ["completed", "failed"].includes(topic.status) ? `
+    <section class="topic-confirmation topic-outcome" aria-live="polite">
+      <div><strong>${topic.status === "completed" ? "主题处理完成" : "主题处理失败"}</strong><span>${escapeHtml(topic.failure_reason || job.error || "请查看下方子 run 与处理产物。")}</span></div>
+      ${topic.artifacts?.knowledge ? `<span class="status completed">知识总结：${escapeHtml(topic.artifacts.knowledge)}</span>` : ""}
+      ${topic.artifacts?.video_processing_audit ? `<span class="status completed">视频审计：${escapeHtml(topic.artifacts.video_processing_audit)}</span>` : ""}
+      ${videoRunSummary}
     </section>` : "";
   topicDetail.innerHTML = `
     <div class="topic-actions">${searchButton}${selectButton}<span class="muted">${escapeHtml(topic.status)}</span></div>
     ${confirmation}
+    ${outcome}
     ${candidates.length ? `<div class="candidate-list">${candidates.map(candidate => `
       <label class="candidate-card"><input type="checkbox" value="${escapeHtml(candidate.candidate_id)}" ${candidate.selected ? "checked" : ""} ${topic.status !== "awaiting_selection" ? "disabled" : ""}>
         <span><span class="candidate-title">${escapeHtml(candidate.title || candidate.url)}</span><span class="candidate-summary">${escapeHtml(candidate.summary || "暂无摘要")}</span><span class="candidate-meta">${escapeHtml(candidate.source_type)} · ${escapeHtml(candidate.host)} · ${escapeHtml((candidate.providers || []).join(", "))}</span><span class="candidate-meta">${escapeHtml(candidate.relevance_reason || "")}${(candidate.risk_flags || []).length ? ` · 风险：${escapeHtml(candidate.risk_flags.join(", "))}` : ""}</span></span>
@@ -132,6 +154,23 @@ function renderTopic(topic) {
       await loadTopics();
       await selectTopic(topic.run_id);
     } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; }
+  });
+  const processButtonNode = document.querySelector("#topic-process-button");
+  if (processButtonNode) processButtonNode.addEventListener("click", async () => {
+    processButtonNode.disabled = true;
+    processButtonNode.textContent = "已加入处理队列";
+    try {
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/process`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vision_mode: document.querySelector("#topic-vision-mode")?.value || "sampled",
+          vision_frame_limit: Number(document.querySelector("#topic-vision-frame-limit")?.value || 12),
+        })
+      });
+      await loadTopics();
+      await selectTopic(topic.run_id);
+    } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; processButtonNode.disabled = false; processButtonNode.textContent = "开始处理已选来源"; }
   });
 }
 
@@ -361,5 +400,12 @@ async function poll() {
   if (state.selectedId) await selectRun(state.selectedId);
 }
 
+async function pollTopics() {
+  if (!topicState.selectedId) return;
+  await loadTopics();
+  await selectTopic(topicState.selectedId);
+}
+
 loadRuns(true);
 state.timer = window.setInterval(poll, 3000);
+window.setInterval(pollTopics, 3000);

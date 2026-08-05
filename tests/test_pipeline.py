@@ -217,6 +217,34 @@ class FakeJudgeClient:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_evidence_only_pipeline_stops_after_timeline_merge(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            state = store.start_or_resume(source.source, source.source_id)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=build_initial_manifest(url, source),
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "视频", "duration": 60}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                evidence_only=True,
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertIn("timeline_merge", result.completed_stages)
+            self.assertNotIn("distill", result.completed_stages)
+            self.assertFalse((store.run_path(result.run_id) / "distillation.json").exists())
+            self.assertTrue(store.evidence_timeline_path(result.run_id).exists())
+
     def test_run_video_pipeline_writes_successful_vision_ocr_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"

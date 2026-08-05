@@ -20,7 +20,7 @@ B站公开视频 URL
 
 v0.2 保持单个 B 站公开视频边界，增加失败可识别、蒸馏可重试、模型响应可脱敏审计、评分可拆分校准，以及视觉成本实验入口。
 
-v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策略。v0.4 在此基础上接入 Fake、Bilibili、GitHub 和 SearXNG 搜索、候选确认和搜索审计，但不包含网页正文抓取、多视频处理或多来源证据融合。
+v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策略。v0.4 在此基础上接入 Fake、Bilibili、GitHub 和 SearXNG 搜索、确定性语义意图、可选 NewAPI 增强、候选确认和搜索审计。Bilibili 仅访问公开搜索入口，JSON 入口返回 412 时可回退解析公开搜索结果页；不使用 cookie、登录、浏览器自动化或验证码绕过。v0.5 处理普通模式中已确认的公开网页：提取正文、保存轻量快照和网页证据，并生成中文 `knowledge.md`。v0.6 将公开视频接入主题子 run，汇入视频时间线证据，隔离单视频失败并执行时长和模型调用预算；跨来源结论融合仍留待后续版本。
 
 ## 2. 目录职责
 
@@ -92,7 +92,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 - `TopicTask`
 - `TopicPackage`
 
-主题任务通过 `TopicTask` 交接主题、模式、预算、实际用量、缓存策略、候选来源、已选来源、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`，`knowledge.md`、`SKILL.md` 与 `score.json` 仍由后续阶段写入。
+主题任务通过 `TopicTask` 交接主题、模式、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据、文本快照和 `knowledge.md`；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。`SKILL.md` 与跨来源融合仍由后续阶段写入。
 
 所有 manifest 和运行记录必须使用仓库相对路径或用户显式配置的输出路径，不得写入凭据、cookie 或临时下载 URL。
 

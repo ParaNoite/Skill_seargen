@@ -24,6 +24,8 @@ from .reports import build_reliability_report, build_vision_report
 from .runs import RunStore, read_json, write_json
 from .search import SearchProviderError, search_topic
 from .source import SourceInferenceError, infer_source
+from .topic_processing import process_web_sources, write_knowledge_markdown
+from .topic_videos import process_topic_videos
 from .topics import TopicRunStore
 
 
@@ -112,6 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
     topic_select.add_argument("candidate_ids", nargs="+", help="一个或多个候选 ID")
     topic_select.add_argument("--runs", default="./runs", help="主题 run 状态目录")
     topic_select.set_defaults(handler=handle_topic_select)
+
+    topic_process = topic_commands.add_parser("process", help="处理已确认的网页和视频来源")
+    topic_process.add_argument("run_id")
+    topic_process.add_argument("--runs", default="./runs", help="主题 run 状态目录")
+    topic_process.add_argument("--timeout-sec", type=int, default=15, help="单个网页请求超时秒数")
+    topic_process.add_argument("--config", default="config.json", help="已选视频时使用的配置文件路径")
+    topic_process.add_argument("--vision-mode", choices=["full", "sampled", "off"], default="sampled")
+    topic_process.add_argument("--vision-frame-limit", type=int, default=12)
+    topic_process.set_defaults(handler=handle_topic_process)
 
     score = subcommands.add_parser("score", help="读取 skill 包评分")
     score.add_argument("skill_dir")
@@ -398,6 +409,94 @@ def handle_topic_select(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
         return 2
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
     return 0
+
+
+def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    store = TopicRunStore(args.runs)
+    try:
+        if args.timeout_sec <= 0 or args.vision_frame_limit <= 0:
+            raise ValueError("网页抓取超时和视觉帧数上限必须是正整数")
+        task = store.load(args.run_id)
+        if task.status != "processing_sources":
+            raise ValueError("只有已确认来源、处于 processing_sources 的主题任务可以处理")
+        run_root = store.run_path(args.run_id)
+        web_result = process_web_sources(task, run_root, timeout_sec=args.timeout_sec)
+        selected_videos = [candidate for candidate in task.selected_sources if candidate.source_type == "video"]
+        video_result = None
+        if selected_videos:
+            video_result = process_topic_videos(
+                task,
+                run_root,
+                load_config(args.config),
+                vision_mode=args.vision_mode,
+                vision_frame_limit=args.vision_frame_limit,
+            )
+            successful_video_ids = {entry.candidate_id for entry in video_result.successful}
+            web_result.skipped = [
+                item for item in web_result.skipped if item.get("candidate_id") not in successful_video_ids
+            ]
+        _save_processed_topic_sources(store, task)
+        task.artifacts["web_processing_audit"] = "web_processing_audit.json"
+        task.artifacts["web_evidence"] = task.package.evidence if task.package else ""
+        if video_result is not None:
+            task.artifacts["video_processing_audit"] = "video_processing_audit.json"
+            task.artifacts["video_runs"] = "video_runs"
+        store.save(task)
+        task = store.record_usage(args.run_id, task.usage)
+        successful_video_count = len(video_result.successful) if video_result is not None else 0
+        if task.status == "failed":
+            pass
+        elif not web_result.evidence and not successful_video_count:
+            task = store.fail(args.run_id, "没有成功提取可用的网页正文或视频证据；请检查处理审计文件")
+        else:
+            store.advance(args.run_id, "generating")
+            if web_result.evidence:
+                knowledge_path = write_knowledge_markdown(task, run_root, web_result)
+                task = store.load(args.run_id)
+                task.artifacts["knowledge"] = str(knowledge_path.relative_to(run_root))
+                store.save(task)
+            store.advance(args.run_id, "scoring")
+            task = store.advance(args.run_id, "completed")
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError, ValueError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    payload = {
+        "run_id": task.run_id,
+        "status": task.status,
+        "current_stage": task.current_stage,
+        "successful_web_sources": len(web_result.evidence),
+        "failed_web_sources": len(web_result.failures),
+        "successful_video_sources": len(video_result.successful) if video_result is not None else 0,
+        "failed_video_sources": len(video_result.failed) if video_result is not None else 0,
+        "skipped_sources": len(web_result.skipped) + (len(video_result.skipped) if video_result is not None else 0),
+        "knowledge": (
+            task.artifacts.get("knowledge")
+            if task.package and task.package.knowledge and (run_root / task.package.knowledge).exists()
+            else None
+        ),
+    }
+    if task.failure_reason:
+        payload["failure_reason"] = task.failure_reason
+    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    return 0 if task.status == "completed" else 1
+
+
+def _save_processed_topic_sources(store: TopicRunStore, task: Any) -> None:
+    package = task.package
+    if package is None:
+        raise ValueError("主题任务缺少主题包索引")
+    path = store.run_path(task.run_id) / package.sources
+    previous = read_json(path) if path.exists() else {}
+    write_json(
+        path,
+        {
+            "topic": task.topic,
+            "candidates": [candidate.to_dict() for candidate in task.candidates],
+            "selected_sources": [candidate.to_dict() for candidate in task.selected_sources],
+            "warnings": previous.get("warnings", []),
+        },
+    )
 
 
 def _video_message(state: Any) -> str:

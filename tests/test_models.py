@@ -9,6 +9,7 @@ from skill_gather.models import (
     TopicBudget,
     TopicPackage,
     TopicTask,
+    TopicVideoRun,
 )
 
 
@@ -109,6 +110,28 @@ class ModelRoundTripTests(unittest.TestCase):
         self.assertEqual(restored.mode, "normal")
         self.assertIsNone(restored.package)
         self.assertEqual(restored.cache.to_dict(), {"reuse_cache": True, "refresh_cache": False})
+
+    def test_topic_task_round_trips_video_child_runs(self):
+        task = TopicTask(
+            run_id="topic-video-12345678",
+            topic="视频主题",
+            video_runs=[
+                TopicVideoRun(
+                    parent_run_id="topic-video-12345678",
+                    candidate_id="cand-video",
+                    child_run_id="bilibili-BV1xx411c7mD--topic-video",
+                    source_url="https://www.bilibili.com/video/BV1xx411c7mD/",
+                    status="completed",
+                    duration_sec=120,
+                    evidence_path="topic_package/evidence/video-cand-video.json",
+                )
+            ],
+        )
+
+        restored = TopicTask.from_dict(task.to_dict())
+
+        self.assertEqual(restored.video_runs[0].parent_run_id, task.run_id)
+        self.assertEqual(restored.video_runs[0].duration_sec, 120)
 
 
 if __name__ == "__main__":

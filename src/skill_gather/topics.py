@@ -73,6 +73,7 @@ class TopicRunStore:
                 sources=f"{package_root}/sources.json",
                 evidence=f"{package_root}/evidence",
                 references=f"{package_root}/references",
+                knowledge=None,
             ),
             artifacts={
                 "topic_package": package_root,
@@ -97,7 +98,35 @@ class TopicRunStore:
         path = self.state_path(run_id)
         if not path.exists():
             raise FileNotFoundError(f"找不到主题 run：{run_id}")
-        return TopicTask.from_dict(read_json(path))
+        task = TopicTask.from_dict(read_json(path))
+        self._normalize_optional_artifacts(task)
+        return task
+
+    def _normalize_optional_artifacts(self, task: TopicTask) -> None:
+        """Keep optional package entries aligned with files on disk, including old runs."""
+        package = task.package
+        if package is None or not package.knowledge:
+            task.artifacts.pop("knowledge", None)
+        else:
+            knowledge_path = self.run_path(task.run_id) / package.knowledge
+            if knowledge_path.exists():
+                task.artifacts.setdefault("knowledge", package.knowledge)
+            else:
+                package.knowledge = None
+                task.artifacts.pop("knowledge", None)
+
+        for video_run in task.video_runs:
+            if not video_run.child_run_id or video_run.vision_status:
+                continue
+            vision_path = self.run_path(task.run_id) / "video_runs" / video_run.child_run_id / "vision_ocr.json"
+            if not vision_path.exists():
+                continue
+            try:
+                vision = read_json(vision_path)
+            except (OSError, ValueError, TypeError):
+                continue
+            video_run.vision_status = str(vision.get("status", ""))
+            video_run.vision_reason = str(vision.get("reason", ""))
 
     def advance(self, run_id: str, status: str) -> TopicTask:
         if status not in TOPIC_RUN_STATUSES:

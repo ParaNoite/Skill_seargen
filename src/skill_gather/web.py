@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from .cli import handle_video
+from .cli import handle_topic_process, handle_video
 from .config import load_config
 from .integrations.newapi import resolve_api_key
 from .models import PIPELINE_STAGES
@@ -34,6 +34,7 @@ class WebApp:
         self.store = RunStore(runs)
         self.topic_store = TopicRunStore(runs)
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._topic_jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def list_runs(self) -> list[dict[str, Any]]:
@@ -75,7 +76,12 @@ class WebApp:
     def get_topic(self, run_id: str) -> dict[str, Any]:
         if not run_id or safe_slug(run_id) != run_id:
             raise FileNotFoundError("无效的主题 run id")
-        return self.topic_store.load(run_id).to_dict()
+        payload = self.topic_store.load(run_id).to_dict()
+        with self._lock:
+            job = self._topic_jobs.get(run_id)
+        if job:
+            payload["job"] = dict(job)
+        return payload
 
     def create_topic(self, topic: str, *, mode: str = "normal", config_path: str | None = None) -> dict[str, Any]:
         topic = topic.strip()
@@ -121,6 +127,67 @@ class WebApp:
 
     def select_topic(self, run_id: str, candidate_ids: list[str]) -> dict[str, Any]:
         return self.topic_store.select_candidates(run_id, candidate_ids).to_dict()
+
+    def process_topic(
+        self,
+        run_id: str,
+        *,
+        vision_mode: str = "sampled",
+        vision_frame_limit: int = 12,
+        config_path: str | None = None,
+    ) -> dict[str, Any]:
+        task = self.topic_store.load(run_id)
+        if task.status != "processing_sources":
+            raise ValueError("只有已确认来源的主题任务可以开始处理")
+        with self._lock:
+            current = self._topic_jobs.get(run_id)
+            if current and current.get("active"):
+                raise RuntimeError("这个主题正在处理中")
+            self._topic_jobs[run_id] = {"active": True, "status": "queued", "error": ""}
+
+        thread = threading.Thread(
+            target=self._run_topic,
+            args=(run_id, vision_mode, vision_frame_limit, config_path or self.config_path),
+            name=f"skill-gather-topic-{run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return {"run_id": run_id, "status": "queued"}
+
+    def _run_topic(self, run_id: str, vision_mode: str, vision_frame_limit: int, config_path: str) -> None:
+        with self._lock:
+            self._topic_jobs[run_id]["status"] = "running"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        args = argparse.Namespace(
+            run_id=run_id,
+            runs=self.runs_path,
+            timeout_sec=15,
+            config=config_path,
+            vision_mode=vision_mode,
+            vision_frame_limit=vision_frame_limit,
+        )
+        try:
+            exit_code = handle_topic_process(args, stdout, stderr)
+            error = stderr.getvalue().strip()
+            payload: dict[str, Any] = {}
+            try:
+                payload = json.loads(stdout.getvalue())
+            except json.JSONDecodeError:
+                pass
+            if exit_code != 0 and not error:
+                error = str(payload.get("failure_reason") or "主题处理未成功完成")
+        except Exception as exc:  # Preserve the error for the local status UI.
+            exit_code = 2
+            error = str(exc)
+            payload = {}
+        with self._lock:
+            self._topic_jobs[run_id] = {
+                "active": False,
+                "status": "failed" if exit_code != 0 else "finished",
+                "error": error,
+                "result": payload,
+            }
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         if not run_id or safe_slug(run_id) != run_id:
@@ -409,6 +476,16 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                             raise ValueError("candidate_ids 必须是数组")
                         result = app.select_topic(run_id, [str(value) for value in candidate_ids])
                         self._send_json(result, HTTPStatus.OK)
+                        return
+                    if suffix.endswith("/process"):
+                        run_id = suffix.removesuffix("/process").strip("/")
+                        result = app.process_topic(
+                            run_id,
+                            vision_mode=str(body.get("vision_mode", "sampled")),
+                            vision_frame_limit=int(body.get("vision_frame_limit", 12)),
+                            config_path=str(body.get("config", "")) or None,
+                        )
+                        self._send_json(result, HTTPStatus.ACCEPTED)
                         return
                 if path == "/api/mvp-check":
                     self._send_json(app.run_mvp_check(str(body.get("api_key", ""))))

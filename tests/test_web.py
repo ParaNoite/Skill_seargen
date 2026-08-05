@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,36 @@ CONFIG = {
 
 
 class WebAppTests(unittest.TestCase):
+    def test_topic_process_starts_background_job_and_exposes_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            task = app.create_topic("网页主题", mode="normal")
+            store = app.topic_store
+            state = store.load(task["run_id"])
+            state.status = "processing_sources"
+            state.current_stage = "processing_sources"
+            store.save(state)
+
+            def fake_process(args, stdout, stderr):
+                stdout.write(json.dumps({"run_id": args.run_id, "status": "completed"}, ensure_ascii=False))
+                return 0
+
+            with patch("skill_gather.web.handle_topic_process", side_effect=fake_process):
+                queued = app.process_topic(task["run_id"], vision_mode="off", vision_frame_limit=1)
+                self.assertEqual(queued["status"], "queued")
+                for _ in range(50):
+                    detail = app.get_topic(task["run_id"])
+                    if not detail.get("job", {}).get("active"):
+                        break
+                    time.sleep(0.01)
+
+            detail = app.get_topic(task["run_id"])
+            self.assertEqual(detail["job"]["status"], "finished")
+            self.assertEqual(detail["job"]["result"]["status"], "completed")
+
     def test_topic_search_and_selection_use_shared_service(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

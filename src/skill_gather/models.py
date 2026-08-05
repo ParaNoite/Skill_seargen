@@ -252,6 +252,29 @@ class TopicSourceCandidate:
 
 
 @dataclass(slots=True)
+class TopicVideoRun:
+    parent_run_id: str
+    candidate_id: str
+    child_run_id: str
+    source_url: str
+    status: str = "created"
+    title: str = ""
+    duration_sec: int = 0
+    model_calls: int = 0
+    evidence_path: str = ""
+    failure_reason: str | None = None
+    vision_status: str = ""
+    vision_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "TopicVideoRun":
+        return cls(**value)
+
+
+@dataclass(slots=True)
 class TopicPackage:
     root: str
     sources: str
@@ -283,6 +306,7 @@ class TopicTask:
     judge_difficulty: str = "standard"
     candidates: list[TopicSourceCandidate] = field(default_factory=list)
     selected_sources: list[TopicSourceCandidate] = field(default_factory=list)
+    video_runs: list[TopicVideoRun] = field(default_factory=list)
     package: TopicPackage | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
     created_at: str = ""
@@ -314,6 +338,7 @@ class TopicTask:
             "judge_difficulty": self.judge_difficulty,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "selected_sources": [source.to_dict() for source in self.selected_sources],
+            "video_runs": [video_run.to_dict() for video_run in self.video_runs],
             "package": self.package.to_dict() if self.package else None,
             "artifacts": dict(self.artifacts),
             "created_at": self.created_at,
@@ -338,6 +363,7 @@ class TopicTask:
             judge_difficulty=value.get("judge_difficulty", "standard"),
             candidates=[TopicSourceCandidate.from_dict(item) for item in value.get("candidates", [])],
             selected_sources=[TopicSourceCandidate.from_dict(item) for item in value.get("selected_sources", [])],
+            video_runs=[TopicVideoRun.from_dict(item) for item in value.get("video_runs", [])],
             package=TopicPackage.from_dict(package_value) if isinstance(package_value, dict) else None,
             artifacts=dict(value.get("artifacts", {})),
             created_at=value.get("created_at", ""),

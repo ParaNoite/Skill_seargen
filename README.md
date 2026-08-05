@@ -2,7 +2,7 @@
 
 `skill_seargen`（search and generate）是一个本地 Python CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并建立主题研究任务的可恢复底座。
 
-当前版本是 v0.4。v0.2 的单视频可靠性与评测能力、v0.3 的主题任务底座保持不变；v0.4 新增 Fake、Bilibili、GitHub 和 SearXNG 搜索 provider、候选去重评分和人工确认。v0.4 只发现和选择来源，不执行后续抓取或多来源处理。
+当前版本是 v0.6。v0.2 的单视频可靠性与评测能力、v0.3 的主题任务底座、v0.4 的搜索和候选确认、v0.5 的网页知识总结保持不变。v0.6 将公开视频接入主题子 run，汇入主题级视频证据，并提供视频级失败隔离和预算控制；跨来源结论融合仍留待后续版本。
 
 ## 项目文档
 
@@ -12,6 +12,8 @@
 - [docs/project-structure.md](docs/project-structure.md)：项目结构规范。
 - [docs/third-party-policy.md](docs/third-party-policy.md)：第三方管理细则。
 - [docs/evidence-contract.md](docs/evidence-contract.md)：证据链 manifest 契约。
+- [docs/v0.5-closure.md](docs/v0.5-closure.md)：v0.5 网页知识总结结项与验收说明。
+- [docs/v0.6-closure.md](docs/v0.6-closure.md)：v0.6 多视频主题处理结项与验收说明。
 - [docs/testing.md](docs/testing.md)：测试规范。
 
 ## 安装
@@ -94,6 +96,7 @@ skill-gather topic create "Godot 导航" --mode technical --runs ./runs
 skill-gather topic search <topic-run-id> --config config.json --runs ./runs --fake
 skill-gather topic candidates <topic-run-id> --runs ./runs
 skill-gather topic select <topic-run-id> <candidate-id> --runs ./runs
+skill-gather topic process <topic-run-id> --runs ./runs --config config.json --vision-mode sampled --vision-frame-limit 12
 skill-gather topic inspect <topic-run-id> --runs ./runs
 skill-gather topic resume <topic-run-id> --runs ./runs
 ```
@@ -117,7 +120,8 @@ skill-gather topic resume <topic-run-id> --runs ./runs
 - `topic create`：创建或恢复普通/技术模式的主题任务，并保存预算、缓存和主题包索引。
 - `topic search`：按模式调用搜索 provider，写入候选、查询审计和 `sources.json`；`--fake` 用于离线验证。
 - `topic candidates`：查看候选 ID、来源类型、质量分、风险和查询来源。
-- `topic select`：显式确认候选来源；v0.4 只保存选择，不触发下载或分析。
+- `topic select`：显式确认候选来源；v0.4 原子写入 `TopicTask.selected_sources` 与 `topic_package/sources.json`，状态进入 `processing_sources`，但不触发下载、抓取、ASR、视觉分析或生成。
+- `topic process`：处理普通模式中已确认的网页和公开视频；网页生成带引用的中文 `knowledge.md`，视频写入主题级时间线证据。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制，GitHub 来源仍会跳过。
 - `topic inspect`：以 JSON 查看主题 run 的阶段、失败信息和将来产物路径。
 - `topic resume`：将失败的主题 run 恢复到失败前的阶段，并保留失败审计信息。
 
@@ -141,7 +145,7 @@ skill-gather video <bilibili-url> --config config.json --vision-mode off --run-v
 
 每次搜索都会先生成可审计的检索意图，再执行 provider 查询、URL/来源检查、去重和排序。默认完全使用确定性规则；`use_newapi_query_expansion` 可让 NewAPI 补充意图侧面和至多两条查询变体，`use_newapi_candidate_assessment` 可批量复核候选元数据并参与排序。两者均为可选增强：无 key、超时或响应无效时自动回退规则结果，且不会声称读取候选页面或观看视频。
 
-普通模式调用 Bilibili + SearXNG，技术模式额外调用 GitHub。未配置 SearXNG 时，真实搜索会明确报配置错误；测试和演示使用 `--fake`。
+普通模式调用 Bilibili + SearXNG，技术模式额外调用 GitHub。单个 provider 失败时保留其他已成功的候选和 warning；所有启用的 provider 都失败时，主题 run 才标记为 `failed`。未配置 SearXNG 时，真实搜索会明确报配置错误；测试和演示使用 `--fake`。
 
 SearXNG 是独立的 AGPL-3.0 本地服务。本项目只调用其 JSON HTTP 接口，不复制源码、不捆绑镜像。它不需要商业搜索 key，但搜索词会发送给实例启用的上游引擎。
 
