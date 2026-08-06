@@ -5,9 +5,13 @@ const stageNames = {
 };
 const statusNames = { created: "排队中", running: "处理中", completed: "已完成", failed: "失败", passed: "通过", needs_review: "待复核" };
 const difficultyNames = { lenient: "宽松", standard: "标准", strict: "严格", off: "关闭 Judge" };
+const RUN_POLL_STATUSES = new Set(["created", "running"]);
+const TOPIC_POLL_STATUSES = new Set(["processing_sources", "generating", "scoring"]);
 
 const state = { runs: [], selectedId: null, timer: null };
+const runPollState = { inFlight: false };
 const topicState = { topics: [], selectedId: null };
+const topicPollState = { inFlight: false };
 const runsList = document.querySelector("#runs-list");
 const detailPanel = document.querySelector("#detail-panel");
 const topicsList = document.querySelector("#topics-list");
@@ -396,15 +400,35 @@ function showToast(message) {
 }
 
 async function poll() {
-  if (!state.runs.some(run => ["created", "running"].includes(run.status))) return;
-  await loadRuns();
-  if (state.selectedId) await selectRun(state.selectedId);
+  if (!state.selectedId) return;
+  if (runPollState.inFlight) return;
+  const current = state.runs.find(run => run.run_id === state.selectedId);
+  if (!current || !RUN_POLL_STATUSES.has(current.status)) return;
+
+  runPollState.inFlight = true;
+  try {
+    await loadRuns();
+    const latest = state.runs.find(run => run.run_id === state.selectedId);
+    if (latest) await selectRun(state.selectedId);
+  } finally {
+    runPollState.inFlight = false;
+  }
 }
 
 async function pollTopics() {
   if (!topicState.selectedId) return;
-  await loadTopics();
-  await selectTopic(topicState.selectedId);
+  if (topicPollState.inFlight) return;
+  const current = topicState.topics.find(topic => topic.run_id === topicState.selectedId);
+  if (!current || !TOPIC_POLL_STATUSES.has(current.status)) return;
+
+  topicPollState.inFlight = true;
+  try {
+    await loadTopics();
+    const latest = topicState.topics.find(topic => topic.run_id === topicState.selectedId);
+    if (latest) await selectTopic(topicState.selectedId);
+  } finally {
+    topicPollState.inFlight = false;
+  }
 }
 
 loadRuns(true);
