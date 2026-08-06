@@ -45,6 +45,14 @@
 - 主题处理在媒体下载前检查累计视频时长，在视觉阶段按 `max_model_calls` 限制远程帧分析调用；本地 faster-whisper ASR 的费用估算为零。
 - 主题子 run 默认复用自身 `video_runs/` 缓存；显式 `refresh_cache` 会重建对应子 run。网页、视频和 GitHub 的结论融合不属于 v0.6。
 
+## v0.7 GitHub 主题契约
+
+- `topic process` 只处理技术模式中用户已确认的公开 `github` 候选；普通模式会跳过 GitHub 来源，不把仓库页面当作普通网页处理。
+- GitHub 处理只读取公开仓库元信息、仓库树和受限数量的文本文件，不 clone 仓库、不执行仓库代码、不安装依赖，也不使用 token、cookie 或登录态。
+- 每个成功来源在 `topic_package/evidence/` 写入 `github-<candidate-id>.json`，在 `topic_package/references/` 写入同名 Markdown 摘要；`github_processing_audit.json` 分别记录成功、失败和跳过来源。
+- GitHub evidence 必须包含仓库元信息、读取文件、分类 findings、0–100 质量分、0–1 置信度、风险和 limitations；已有 skill/Agent 格式材料只作为降级参考，不直接成为最终 skill。
+- GitHub-only 技术主题可凭 GitHub 证据完成来源处理阶段。网页、视频和 GitHub 的统一结论融合不属于 v0.7。
+
 ## 通用规则
 
 - 时间必须能追溯到视频时间戳。

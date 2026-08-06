@@ -104,6 +104,7 @@ def process_github_sources(
                     "candidate_id": record["candidate_id"],
                     "repo": record["repo"],
                     "quality_score": record["quality_score"],
+                    "confidence": record["confidence"],
                     "risk_flags": record["risk_flags"],
                 }
                 for record in result.evidence
@@ -141,7 +142,13 @@ def fetch_public_github_repository(
         raw_url = f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/{quote(default_branch, safe='')}/{quote(path)}"
         text = _get_text(raw_url, timeout_sec=timeout_sec, max_bytes=max_bytes)
         files.append(GitHubFile(path=path, text=text, html_url=f"{html_url}/blob/{default_branch}/{path}"))
-    return GitHubRepositorySnapshot(repo=full_name, html_url=html_url, default_branch=default_branch, files=files, truncated=len(paths) >= max_files)
+    return GitHubRepositorySnapshot(
+        repo=full_name,
+        html_url=html_url,
+        default_branch=default_branch,
+        files=files,
+        truncated=bool(tree_payload.get("truncated")) or len(paths) >= max_files,
+    )
 
 
 def parse_github_repo(url: str) -> tuple[str, str]:
@@ -207,6 +214,7 @@ def build_github_evidence(
     if not findings["installation"] and not findings["commands"]:
         risk_flags.append("github_usage_evidence_weak")
 
+    quality_score = _score_github_evidence(candidate.quality_score, findings, snapshot.files)
     record = {
         "source_id": f"G{source_number}",
         "candidate_id": candidate.candidate_id,
@@ -216,7 +224,8 @@ def build_github_evidence(
         "url": snapshot.html_url,
         "default_branch": snapshot.default_branch,
         "analyzed_at": datetime.now(UTC).isoformat(),
-        "quality_score": _score_github_evidence(candidate.quality_score, findings, snapshot.files),
+        "quality_score": quality_score,
+        "confidence": round(quality_score / 100, 2),
         "risk_flags": _unique(risk_flags),
         "files": file_summaries,
         "findings": findings,

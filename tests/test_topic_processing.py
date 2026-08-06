@@ -172,7 +172,10 @@ class TopicProcessingTests(unittest.TestCase):
 
             self.assertEqual(len(result.evidence), 1)
             self.assertFalse(result.failures)
-            self.assertTrue((run_root / "topic_package/evidence/github-cand-github.json").exists())
+            evidence_path = run_root / "topic_package/evidence/github-cand-github.json"
+            self.assertTrue(evidence_path.exists())
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["confidence"], evidence["quality_score"] / 100)
             reference = run_root / "topic_package/references/github-cand-github.md"
             self.assertTrue(reference.exists())
             self.assertIn("已有 skill 材料", reference.read_text(encoding="utf-8"))
@@ -196,6 +199,34 @@ class TopicProcessingTests(unittest.TestCase):
             self.assertFalse(result.evidence)
             self.assertEqual(result.skipped[0]["candidate_id"], "cand-github")
             self.assertIn("普通模式", result.skipped[0]["reason"])
+
+    def test_process_github_sources_records_truncated_snapshot_risk(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Skill 工具开发", mode="technical")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                canonical_url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                selected=True,
+            )
+            task.selected_sources = [candidate]
+
+            result = process_github_sources(
+                task,
+                store.run_path(task.run_id),
+                fetcher=lambda *_args, **_kwargs: GitHubRepositorySnapshot(
+                    repo="example/toolkit",
+                    html_url="https://github.com/example/toolkit",
+                    default_branch="main",
+                    files=[GitHubFile("README.md", "Install with pip install toolkit.")],
+                    truncated=True,
+                ),
+            )
+
+            self.assertEqual(len(result.evidence), 1)
+            self.assertIn("github_file_selection_truncated", result.evidence[0]["risk_flags"])
 
     def test_topic_process_command_completes_technical_github_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
