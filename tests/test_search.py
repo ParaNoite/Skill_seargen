@@ -59,6 +59,62 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(candidates[0].engines, ["one", "two"])
         self.assertTrue(candidates[0].candidate_id.startswith("cand-"))
 
+    def test_normalization_drops_severe_download_keyword_spam(self):
+        spam = "个人收藏书籍列表 " + "PDF下载 百度云 电子书下载 免费下载 " * 12
+        batches = [
+            FakeSearchProvider(
+                {
+                    "*": [
+                        RawSearchResult(
+                            "github",
+                            "Godot navigation",
+                            1,
+                            "https://github.com/example/books",
+                            "example/books",
+                            spam,
+                            "github",
+                        )
+                    ]
+                }
+            ).search(["Godot navigation"], max_results=10)
+        ]
+
+        self.assertEqual(normalize_candidates("Godot navigation", batches, max_candidates=20), [])
+
+    def test_normalization_prefers_clean_summary_over_long_spam_duplicate(self):
+        spam = "PDF下载 百度云 电子书下载 免费下载 " * 12
+        batches = [
+            FakeSearchProvider(
+                {
+                    "*": [
+                        RawSearchResult(
+                            "github",
+                            "Godot navigation",
+                            1,
+                            "https://github.com/example/navigation",
+                            "example/navigation",
+                            "Godot NavigationAgent examples and API documentation.",
+                            "github",
+                        ),
+                        RawSearchResult(
+                            "searxng",
+                            "Godot navigation",
+                            2,
+                            "https://github.com/example/navigation",
+                            "example/navigation",
+                            spam,
+                            "search",
+                        ),
+                    ]
+                }
+            ).search(["Godot navigation"], max_results=10)
+        ]
+
+        candidates = normalize_candidates("Godot navigation", batches, max_candidates=20)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].summary, "Godot NavigationAgent examples and API documentation.")
+
     def test_cache_round_trip_and_expiry_configuration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             cache = SearchCache(Path(temp_dir) / "cache.sqlite3", ttl_sec=3600)

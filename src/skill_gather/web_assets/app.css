@@ -105,7 +105,7 @@ button { cursor: pointer; }
 .candidate-card:has(input:checked) { border-color: #81b496; background: var(--green-wash); }
 .candidate-card input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--green); }
 .candidate-title { display: block; font-weight: 700; overflow-wrap: anywhere; }
-.candidate-summary { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.candidate-summary { display: -webkit-box; margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .candidate-meta { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.35; }
 .candidate-score { align-self: start; padding: 4px 7px; border-radius: 4px; color: var(--green-dark); background: var(--green-soft); font-size: 12px; font-weight: 750; text-align: center; white-space: nowrap; }
 .submit-panel {

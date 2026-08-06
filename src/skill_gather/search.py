@@ -23,6 +23,8 @@ from .models import TopicSourceCandidate, TopicTask
 
 _TRACKING_QUERY_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 _BILIBILI_HOSTS = {"bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}
+_DOWNLOAD_SPAM_MARKERS = ("pdf下载", "电子书下载", "百度云", "免费下载", "网盘下载")
+_MAX_CANDIDATE_SUMMARY_CHARS = 360
 _TAG_RE = re.compile(r"<[^>]+>")
 _BILIBILI_VIDEO_PATH_RE = re.compile(r"^//(?:www\.)?bilibili\.com/video/(BV[0-9A-Za-z]{10})/?$")
 _BILIBILI_BROWSER_HEADERS = {
@@ -579,7 +581,11 @@ def normalize_candidates(topic: str, batches: list[SearchBatch], *, max_candidat
     for canonical, results in grouped.items():
         first = results[0]
         title = max((item.title.strip() for item in results), key=len, default="")
-        summary = max((item.snippet.strip() for item in results), key=len, default="")
+        summaries = [item.snippet for item in results if item.snippet.strip()]
+        clean_summaries = [_clean_candidate_summary(summary) for summary in summaries if not _is_severe_download_spam(summary)]
+        if summaries and not clean_summaries:
+            continue
+        summary = max(clean_summaries, key=len, default="")
         providers = _unique([item.provider for item in results])
         engines = _unique([item.engine for item in results if item.engine])
         queries = _unique([item.query for item in results])
@@ -648,6 +654,20 @@ def score_candidate(topic: str, title: str, summary: str, source_type: str, risk
     freshness = 5
     risk_penalty = 10 if risks else 0
     return max(0, min(100, relevance + trust + completeness + freshness - risk_penalty))
+
+
+def _clean_candidate_summary(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    if len(normalized) <= _MAX_CANDIDATE_SUMMARY_CHARS:
+        return normalized
+    return normalized[: _MAX_CANDIDATE_SUMMARY_CHARS - 1].rstrip() + "…"
+
+
+def _is_severe_download_spam(value: str) -> bool:
+    lowered = re.sub(r"\s+", "", value.lower())
+    hits = sum(lowered.count(marker) for marker in _DOWNLOAD_SPAM_MARKERS)
+    distinct_markers = sum(marker in lowered for marker in _DOWNLOAD_SPAM_MARKERS)
+    return hits >= 6 and distinct_markers >= 2
 
 
 def _matched_facets(title: str, summary: str, facets: list[str]) -> list[str]:
