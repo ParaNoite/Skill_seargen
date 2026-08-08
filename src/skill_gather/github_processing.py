@@ -6,6 +6,8 @@ from pathlib import Path
 import json
 import os
 import re
+import ssl
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import quote, urlsplit
@@ -27,6 +29,7 @@ _ROOT_FILE_NAMES = {
     "dockerfile",
 }
 _TEXT_EXTENSIONS = {".md", ".txt", ".py", ".js", ".ts", ".json", ".toml", ".yaml", ".yml", ".gd", ".cs"}
+_NETWORK_RETRY_DELAYS = (0.25, 0.5)
 
 
 @dataclass(slots=True)
@@ -332,10 +335,19 @@ def _get_text(
     headers = {"User-Agent": "skill-seargen/0.7", "Accept": accept}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        data = response.read(max_bytes + 1)
+    for attempt in range(len(_NETWORK_RETRY_DELAYS) + 1):
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                data = response.read(max_bytes + 1)
+            break
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError):
+            if attempt >= len(_NETWORK_RETRY_DELAYS):
+                raise
+            time.sleep(_NETWORK_RETRY_DELAYS[attempt])
     if len(data) > max_bytes:
         if not truncate:
             raise GitHubProcessingError(f"GitHub API 响应超过 {max_bytes} 字节上限")

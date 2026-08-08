@@ -1,5 +1,7 @@
 import json
+import http.client
 import os
+import ssl
 import tempfile
 import threading
 import unittest
@@ -11,6 +13,7 @@ from skill_gather.cli import main
 from skill_gather.github_processing import (
     GitHubFile,
     GitHubRepositorySnapshot,
+    _get_text,
     fetch_public_github_repository,
     process_github_sources,
 )
@@ -20,6 +23,35 @@ from skill_gather.topics import TopicRunStore
 
 
 class TopicProcessingTests(unittest.TestCase):
+    def test_github_text_fetch_retries_transient_tls_disconnects(self):
+        from unittest.mock import patch
+
+        class Response:
+            headers = type("Headers", (), {"get_content_charset": lambda self: "utf-8"})()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _limit):
+                return b"GitHub content"
+
+        with patch(
+            "skill_gather.github_processing.urllib.request.urlopen",
+            side_effect=[
+                ssl.SSLEOFError(8, "EOF occurred in violation of protocol"),
+                http.client.RemoteDisconnected("Remote end closed connection without response"),
+                Response(),
+            ],
+        ) as urlopen, patch("time.sleep") as sleep:
+            text = _get_text("https://raw.githubusercontent.com/example/repo/main/README.md", timeout_sec=5, max_bytes=100)
+
+        self.assertEqual(text, "GitHub content")
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.5])
+
     def test_process_web_sources_writes_evidence_snapshot_and_knowledge(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TopicRunStore(Path(temp_dir) / "runs")
