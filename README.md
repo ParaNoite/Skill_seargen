@@ -142,7 +142,7 @@ skill-gather video <bilibili-url> --config config.json --vision-mode off --run-v
 
 ### 搜索配置
 
-`configs/skill-gather.example.json` 的 `search` 节包含搜索超时、缓存 TTL、Bilibili JSON 搜索入口及其公开搜索页回退地址、GitHub API 地址和 SearXNG 地址。Bilibili JSON 入口返回 412 时，会只解析公开搜索结果页中的视频卡片，不访问候选视频页；该回退不使用 cookie、登录、浏览器自动化或验证码绕过。GitHub token 可通过 `GITHUB_TOKEN`（或 `github_token_env` 指定的变量）提供，不写入配置或 run。
+`configs/skill-gather.example.json` 的 `search` 节包含搜索超时、缓存 TTL、Bilibili JSON 搜索入口及其公开搜索页回退地址、GitHub API 地址和 SearXNG 地址。Bilibili JSON 入口返回 412 时，会只解析公开搜索结果页中的视频卡片，不访问候选视频页；该回退不使用 cookie、登录、浏览器自动化或验证码绕过。GitHub 默认匿名读取公开仓库；可选 token 通过 `GITHUB_TOKEN`（或 `github_token_env` 指定的变量）提供，只随 GitHub API 请求发送，不写入配置或 run。匿名 API 限流时会降级读取公开仓库的 README，并在 evidence 中标记限制。
 
 每次搜索都会先生成可审计的检索意图，再执行 provider 查询、URL/来源检查、去重和排序。默认完全使用确定性规则；`use_newapi_query_expansion` 可让 NewAPI 补充意图侧面和至多两条查询变体，`use_newapi_candidate_assessment` 可批量复核候选元数据并参与排序。两者均为可选增强：无 key、超时或响应无效时自动回退规则结果，且不会声称读取候选页面或观看视频。
 

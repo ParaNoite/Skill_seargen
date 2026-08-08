@@ -48,9 +48,10 @@
 ## v0.7 GitHub 主题契约
 
 - `topic process` 只处理技术模式中用户已确认的公开 `github` 候选；普通模式会跳过 GitHub 来源，不把仓库页面当作普通网页处理。
-- GitHub 处理只读取公开仓库元信息、仓库树和受限数量的文本文件，不 clone 仓库、不执行仓库代码、不安装依赖，也不使用 token、cookie 或登录态。
+- GitHub 处理只读取公开仓库元信息、仓库树和受限数量的文本文件，不 clone 仓库、不执行仓库代码、不安装依赖，也不使用 cookie 或登录态。默认匿名读取；可选 token 只随 GitHub API 请求发送，绝不写入主题任务、审计或 evidence。
 - 每个成功来源在 `topic_package/evidence/` 写入 `github-<candidate-id>.json`，在 `topic_package/references/` 写入同名 Markdown 摘要；`github_processing_audit.json` 分别记录成功、失败和跳过来源。
 - GitHub evidence 必须包含仓库元信息、读取文件、分类 findings、0–100 质量分、0–1 置信度、风险和 limitations；已有 skill/Agent 格式材料只作为降级参考，不直接成为最终 skill。
+- 匿名 GitHub API 限流时，可改从公开 raw 地址读取 `main/master` 分支的 README；该 evidence 必须标记 `github_api_rate_limit_fallback`、`github_file_selection_truncated`，并在 limitations 中说明只读取了 README。
 - GitHub-only 技术主题可凭 GitHub 证据完成来源处理阶段。网页、视频和 GitHub 的统一结论融合不属于 v0.7。
 
 ## 通用规则
