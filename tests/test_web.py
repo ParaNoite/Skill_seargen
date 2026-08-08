@@ -27,6 +27,24 @@ CONFIG = {
 
 
 class WebAppTests(unittest.TestCase):
+    def test_failed_topic_can_resume_for_processing_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            task = app.create_topic("Godot 工具包", mode="technical")
+            state = app.topic_store.load(task["run_id"])
+            state.status = "failed"
+            state.current_stage = "processing_sources"
+            state.failure_stage = "processing_sources"
+            state.failure_reason = "GitHub API 速率限制"
+            app.topic_store.save(state)
+
+            resumed = app.resume_topic(task["run_id"])
+
+            self.assertEqual(resumed["status"], "processing_sources")
+
     def test_topic_process_starts_background_job_and_exposes_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

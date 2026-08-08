@@ -128,6 +128,9 @@ class WebApp:
     def select_topic(self, run_id: str, candidate_ids: list[str]) -> dict[str, Any]:
         return self.topic_store.select_candidates(run_id, candidate_ids).to_dict()
 
+    def resume_topic(self, run_id: str) -> dict[str, Any]:
+        return self.topic_store.resume(run_id).to_dict()
+
     def process_topic(
         self,
         run_id: str,
@@ -475,6 +478,11 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                         if not isinstance(candidate_ids, list):
                             raise ValueError("candidate_ids 必须是数组")
                         result = app.select_topic(run_id, [str(value) for value in candidate_ids])
+                        self._send_json(result, HTTPStatus.OK)
+                        return
+                    if suffix.endswith("/resume"):
+                        run_id = suffix.removesuffix("/resume").strip("/")
+                        result = app.resume_topic(run_id)
                         self._send_json(result, HTTPStatus.OK)
                         return
                     if suffix.endswith("/process"):

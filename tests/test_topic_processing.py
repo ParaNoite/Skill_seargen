@@ -1,12 +1,19 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from skill_gather.cli import main
-from skill_gather.github_processing import GitHubFile, GitHubRepositorySnapshot, process_github_sources
+from skill_gather.github_processing import (
+    GitHubFile,
+    GitHubRepositorySnapshot,
+    fetch_public_github_repository,
+    process_github_sources,
+)
 from skill_gather.models import TopicSourceCandidate
 from skill_gather.topic_processing import process_web_sources, write_knowledge_markdown
 from skill_gather.topics import TopicRunStore
@@ -227,6 +234,100 @@ class TopicProcessingTests(unittest.TestCase):
 
             self.assertEqual(len(result.evidence), 1)
             self.assertIn("github_file_selection_truncated", result.evidence[0]["risk_flags"])
+
+    def test_process_github_sources_forwards_token_environment_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Skill 工具开发", mode="technical")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                canonical_url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                selected=True,
+            )
+            task.selected_sources = [candidate]
+
+            from unittest.mock import patch
+
+            with patch(
+                "skill_gather.github_processing.fetch_public_github_repository",
+                return_value=GitHubRepositorySnapshot(
+                    repo="example/toolkit",
+                    html_url="https://github.com/example/toolkit",
+                    default_branch="main",
+                    files=[GitHubFile("README.md", "安装：pip install toolkit")],
+                ),
+            ) as fetcher:
+                process_github_sources(
+                    task,
+                    store.run_path(task.run_id),
+                    token_env="CUSTOM_GITHUB_TOKEN",
+                )
+
+                fetcher.assert_called_once_with(
+                    "https://github.com/example/toolkit",
+                    timeout_sec=15,
+                    token_env="CUSTOM_GITHUB_TOKEN",
+                )
+
+    def test_process_github_sources_explains_rate_limit_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Skill 工具开发", mode="technical")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                canonical_url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                selected=True,
+            )
+            task.selected_sources = [candidate]
+            error = urllib.error.HTTPError(
+                candidate.url,
+                403,
+                "rate limit exceeded",
+                hdrs=None,
+                fp=None,
+            )
+
+            result = process_github_sources(
+                task,
+                store.run_path(task.run_id),
+                fetcher=lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+            )
+
+            self.assertIn("GitHub API 速率限制", result.failures[0]["reason"])
+
+    def test_github_fetch_falls_back_to_public_readme_when_anonymous_api_is_rate_limited(self):
+        from unittest.mock import patch
+
+        rate_limit = urllib.error.HTTPError(
+            "https://api.github.com/repos/example/toolkit",
+            403,
+            "rate limit exceeded",
+            hdrs=None,
+            fp=None,
+        )
+
+        def read_public_file(url, **_kwargs):
+            if url.endswith("/main/README.md"):
+                return "# Toolkit\n\nInstall with pip install toolkit."
+            raise urllib.error.HTTPError(url, 404, "not found", hdrs=None, fp=None)
+
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "skill_gather.github_processing._get_json",
+            side_effect=rate_limit,
+        ), patch(
+            "skill_gather.github_processing._get_text",
+            side_effect=read_public_file,
+        ):
+            snapshot = fetch_public_github_repository("https://github.com/example/toolkit")
+
+        self.assertEqual(snapshot.default_branch, "main")
+        self.assertEqual([file.path for file in snapshot.files], ["README.md"])
+        self.assertTrue(snapshot.truncated)
+        self.assertEqual(snapshot.fallback_reason, "github_api_rate_limit_fallback")
 
     def test_topic_process_command_completes_technical_github_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:

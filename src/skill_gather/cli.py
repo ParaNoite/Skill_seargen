@@ -443,7 +443,16 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
                 item for item in web_result.skipped if item.get("candidate_id") not in successful_video_ids
             ]
         if selected_github:
-            github_result = process_github_sources(task, run_root, timeout_sec=args.timeout_sec)
+            github_token_env = "GITHUB_TOKEN"
+            config_path = Path(args.config)
+            if config_path.exists():
+                github_token_env = load_config(args.config).search.github_token_env
+            github_result = process_github_sources(
+                task,
+                run_root,
+                timeout_sec=args.timeout_sec,
+                token_env=github_token_env,
+            )
             successful_github_ids = {str(record["candidate_id"]) for record in github_result.evidence}
             web_result.skipped = [
                 item for item in web_result.skipped if item.get("candidate_id") not in successful_github_ids
@@ -464,7 +473,17 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
         if task.status == "failed":
             pass
         elif not web_result.evidence and not successful_video_count and not successful_github_count:
-            task = store.fail(args.run_id, "没有成功提取可用的网页正文、视频证据或 GitHub 证据；请检查处理审计文件")
+            failure_details = _unique(
+                [
+                    str(item.get("reason", ""))
+                    for item in (web_result.failures + (github_result.failures if github_result is not None else []))
+                    if item.get("reason")
+                ]
+            )
+            reason = "没有成功提取可用的网页正文、视频证据或 GitHub 证据；请检查处理审计文件"
+            if failure_details:
+                reason += "。失败原因：" + "；".join(failure_details[:3])
+            task = store.fail(args.run_id, reason)
         else:
             store.advance(args.run_id, "generating")
             if web_result.evidence:

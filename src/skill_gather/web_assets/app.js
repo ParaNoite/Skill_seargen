@@ -111,6 +111,7 @@ function renderTopic(topic) {
   const job = topic.job || {};
   const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
   const selectButton = topic.status === "awaiting_selection" && candidates.length ? '<button id="topic-select-button" class="button primary" type="button">确认选择</button>' : "";
+  const retryButton = topic.status === "failed" ? '<button id="topic-retry-button" class="button secondary" type="button">恢复后重试</button>' : "";
   const processButton = topic.status === "processing_sources" && !job.active ? '<button id="topic-process-button" class="button primary" type="button">开始处理已选来源</button>' : "";
   const processControls = topic.status === "processing_sources" && !job.active ? `
     <label class="topic-inline-control">视觉模式<select id="topic-vision-mode"><option value="off">关闭</option><option value="sampled" selected>抽样</option><option value="full">全量</option></select></label>
@@ -126,14 +127,14 @@ function renderTopic(topic) {
     </section>` : "";
   const outcome = ["completed", "failed"].includes(topic.status) ? `
     <section class="topic-confirmation topic-outcome" aria-live="polite">
-      <div><strong>${topic.status === "completed" ? "主题处理完成" : "主题处理失败"}</strong><span>${escapeHtml(topic.failure_reason || job.error || "请查看下方子 run 与处理产物。")}</span></div>
+      <div><strong>${topic.status === "completed" ? "主题处理完成" : "主题处理失败"}</strong><span>${escapeHtml(topic.status === "failed" ? (topic.failure_reason || job.error || "请查看处理审计文件。") : "处理产物已生成，请查看下方审计文件。")}</span></div>
       ${topic.artifacts?.knowledge ? `<span class="status completed">知识总结：${escapeHtml(topic.artifacts.knowledge)}</span>` : ""}
       ${topic.artifacts?.video_processing_audit ? `<span class="status completed">视频审计：${escapeHtml(topic.artifacts.video_processing_audit)}</span>` : ""}
       ${topic.artifacts?.github_processing_audit ? `<span class="status completed">GitHub 审计：${escapeHtml(topic.artifacts.github_processing_audit)}</span>` : ""}
       ${videoRunSummary}
     </section>` : "";
   topicDetail.innerHTML = `
-    <div class="topic-actions">${searchButton}${selectButton}<span class="muted">${escapeHtml(topic.status)}</span></div>
+    <div class="topic-actions">${searchButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)}</span></div>
     ${confirmation}
     ${outcome}
     ${candidates.length ? `<div class="candidate-list">${candidates.map(candidate => `
@@ -159,6 +160,21 @@ function renderTopic(topic) {
       await loadTopics();
       await selectTopic(topic.run_id);
     } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; }
+  });
+  const retryButtonNode = document.querySelector("#topic-retry-button");
+  if (retryButtonNode) retryButtonNode.addEventListener("click", async () => {
+    retryButtonNode.disabled = true;
+    retryButtonNode.textContent = "恢复中...";
+    try {
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      await loadTopics();
+      await selectTopic(topic.run_id);
+    } catch (error) {
+      topicMessage.textContent = error.message;
+      topicMessage.className = "form-message error";
+      retryButtonNode.disabled = false;
+      retryButtonNode.textContent = "恢复后重试";
+    }
   });
   const processButtonNode = document.querySelector("#topic-process-button");
   if (processButtonNode) processButtonNode.addEventListener("click", async () => {

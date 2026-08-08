@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -42,6 +43,7 @@ class GitHubRepositorySnapshot:
     default_branch: str
     files: list[GitHubFile] = field(default_factory=list)
     truncated: bool = False
+    fallback_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -61,6 +63,7 @@ def process_github_sources(
     *,
     timeout_sec: int = 15,
     fetcher=None,
+    token_env: str = "GITHUB_TOKEN",
 ) -> GitHubProcessingResult:
     package = task.package
     if package is None:
@@ -71,7 +74,16 @@ def process_github_sources(
     references_dir.mkdir(parents=True, exist_ok=True)
 
     result = GitHubProcessingResult()
-    fetch_repo = fetcher or fetch_public_github_repository
+    if fetcher is not None:
+        fetch_repo = fetcher
+    elif token_env == "GITHUB_TOKEN":
+        fetch_repo = fetch_public_github_repository
+    else:
+        fetch_repo = lambda url, *, timeout_sec: fetch_public_github_repository(
+            url,
+            timeout_sec=timeout_sec,
+            token_env=token_env,
+        )
 
     for candidate in task.selected_sources:
         if candidate.source_type != "github":
@@ -90,6 +102,14 @@ def process_github_sources(
             result.evidence.append(record)
         except GitHubProcessingError as exc:
             result.failures.append(_item(candidate, str(exc)))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                reason = f"GitHub API 速率限制（HTTP 403）；请设置 {token_env} 后重试，或稍后再试"
+            elif exc.code == 401:
+                reason = f"GitHub token 无效（HTTP 401）；请检查 {token_env}"
+            else:
+                reason = f"GitHub 公开仓库读取失败：HTTP {exc.code}"
+            result.failures.append(_item(candidate, reason))
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             result.failures.append(_item(candidate, f"GitHub 公开仓库读取失败：{exc}"))
 
@@ -122,17 +142,30 @@ def fetch_public_github_repository(
     timeout_sec: int = 15,
     max_files: int = 12,
     max_bytes: int = 24_000,
+    token_env: str = "GITHUB_TOKEN",
 ) -> GitHubRepositorySnapshot:
     owner, repo = parse_github_repo(url)
     repo_api = f"https://api.github.com/repos/{quote(owner)}/{quote(repo)}"
-    metadata = _get_json(repo_api, timeout_sec=timeout_sec)
+    token = os.getenv(token_env, "").strip()
+    try:
+        metadata = _get_json(repo_api, timeout_sec=timeout_sec, token=token)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403 and not token:
+            return _fetch_public_readme_fallback(
+                owner,
+                repo,
+                timeout_sec=timeout_sec,
+                max_bytes=max_bytes,
+                rate_limit_error=exc,
+            )
+        raise
     if bool(metadata.get("private")):
         raise GitHubProcessingError("私有 GitHub 仓库不在 v0.7 范围内")
     default_branch = str(metadata.get("default_branch") or "main")
     full_name = str(metadata.get("full_name") or f"{owner}/{repo}")
     html_url = str(metadata.get("html_url") or f"https://github.com/{owner}/{repo}")
     tree_url = f"{repo_api}/git/trees/{quote(default_branch, safe='')}?recursive=1"
-    tree_payload = _get_json(tree_url, timeout_sec=timeout_sec)
+    tree_payload = _get_json(tree_url, timeout_sec=timeout_sec, token=token)
     tree = tree_payload.get("tree", []) if isinstance(tree_payload, dict) else []
     if not isinstance(tree, list):
         raise GitHubProcessingError("GitHub 仓库树响应格式无效")
@@ -149,6 +182,36 @@ def fetch_public_github_repository(
         files=files,
         truncated=bool(tree_payload.get("truncated")) or len(paths) >= max_files,
     )
+
+
+def _fetch_public_readme_fallback(
+    owner: str,
+    repo: str,
+    *,
+    timeout_sec: int,
+    max_bytes: int,
+    rate_limit_error: urllib.error.HTTPError,
+) -> GitHubRepositorySnapshot:
+    html_url = f"https://github.com/{owner}/{repo}"
+    for branch in ("main", "master"):
+        for path in ("README.md", "README", "readme.md", "Readme.md"):
+            raw_url = f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/{branch}/{path}"
+            try:
+                text = _get_text(raw_url, timeout_sec=timeout_sec, max_bytes=max_bytes)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                raise
+            if text.strip():
+                return GitHubRepositorySnapshot(
+                    repo=f"{owner}/{repo}",
+                    html_url=html_url,
+                    default_branch=branch,
+                    files=[GitHubFile(path=path, text=text, html_url=f"{html_url}/blob/{branch}/{path}")],
+                    truncated=True,
+                    fallback_reason="github_api_rate_limit_fallback",
+                )
+    raise rate_limit_error
 
 
 def parse_github_repo(url: str) -> tuple[str, str]:
@@ -209,12 +272,20 @@ def build_github_evidence(
     risk_flags = list(candidate.risk_flags)
     if snapshot.truncated:
         risk_flags.append("github_file_selection_truncated")
+    if snapshot.fallback_reason:
+        risk_flags.append(snapshot.fallback_reason)
     if findings["skill_materials"]:
         risk_flags.append("github_existing_skill_material_downgraded")
     if not findings["installation"] and not findings["commands"]:
         risk_flags.append("github_usage_evidence_weak")
 
     quality_score = _score_github_evidence(candidate.quality_score, findings, snapshot.files)
+    limitations = [
+        "仅分析公开 GitHub 仓库中的少量文本文件，不 clone 仓库，不执行代码。",
+        "已有 Codex / Anthropic skill 格式材料只作为参考降级处理，不直接等同于最终生成结果。",
+    ]
+    if snapshot.fallback_reason:
+        limitations.append("GitHub API 触发匿名速率限制，本次仅通过公开 raw 地址读取 README。")
     record = {
         "source_id": f"G{source_number}",
         "candidate_id": candidate.candidate_id,
@@ -229,16 +300,20 @@ def build_github_evidence(
         "risk_flags": _unique(risk_flags),
         "files": file_summaries,
         "findings": findings,
-        "limitations": [
-            "仅分析公开 GitHub 仓库中的少量文本文件，不 clone 仓库，不执行代码。",
-            "已有 Codex / Anthropic skill 格式材料只作为参考降级处理，不直接等同于最终生成结果。",
-        ],
+        "limitations": limitations,
     }
     return record
 
 
-def _get_json(url: str, *, timeout_sec: int) -> dict[str, object]:
-    text = _get_text(url, timeout_sec=timeout_sec, max_bytes=1_000_000, accept="application/vnd.github+json")
+def _get_json(url: str, *, timeout_sec: int, token: str = "") -> dict[str, object]:
+    text = _get_text(
+        url,
+        timeout_sec=timeout_sec,
+        max_bytes=8_000_000,
+        accept="application/vnd.github+json",
+        token=token,
+        truncate=False,
+    )
     payload = json.loads(text)
     if not isinstance(payload, dict):
         raise GitHubProcessingError("GitHub 响应不是 JSON 对象")
@@ -251,12 +326,19 @@ def _get_text(
     timeout_sec: int,
     max_bytes: int,
     accept: str = "text/plain, application/json",
+    token: str = "",
+    truncate: bool = True,
 ) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": "skill-seargen/0.7", "Accept": accept})
+    headers = {"User-Agent": "skill-seargen/0.7", "Accept": accept}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout_sec) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
+        if not truncate:
+            raise GitHubProcessingError(f"GitHub API 响应超过 {max_bytes} 字节上限")
         data = data[:max_bytes]
     return data.decode(charset, errors="replace")
 
