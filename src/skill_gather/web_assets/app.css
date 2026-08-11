@@ -320,7 +320,7 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
   .topbar { padding: 0 16px; }
   .local-status { display: none; }
   .shell { padding: 16px; }
-  .view-panel .section-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .view-panel .section-heading { height: auto; align-items: flex-start; flex-direction: column; gap: 12px; }
   .topic-panel { padding: 21px 18px 0; }
   .topic-workspace { display: block; }
   .topics-list { border-right: 0; border-bottom: 1px solid var(--line); }
