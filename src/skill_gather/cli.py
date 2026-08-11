@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .adapters.bilibili import build_initial_manifest
+from .automation import evaluate_release_gate
 from .acceptance import run_offline_acceptance
 from .config import ConfigError, load_config
 from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
@@ -642,15 +643,27 @@ def _complete_topic_generation(store: TopicRunStore, task: Any, run_root: Path, 
         if task.package is None:
             raise ValueError("主题任务缺少主题包索引")
         if task.status == "generating":
-            skill_path, score_path, _score = generate_technical_skill(task, run_root, fusion)
+            skill_path, score_path, score = generate_technical_skill(task, run_root, fusion)
             task = store.load(task.run_id)
             if task.package is None:
                 raise ValueError("主题任务缺少主题包索引")
             task.package.skill = skill_path.relative_to(run_root).as_posix()
         else:
-            score_path, _score = rescore_technical_package(task, run_root, fusion)
+            score_path, score = rescore_technical_package(task, run_root, fusion)
         task.package.score = score_path.relative_to(run_root).as_posix()
         task.artifacts.update({"skill": task.package.skill or "", "score": task.package.score})
+        gate = evaluate_release_gate(task, fusion, score)
+        write_json(run_root / "release_gate.json", gate.to_dict())
+        task.artifacts["release_gate"] = "release_gate.json"
+        if task.execution_mode == "auto" and gate.status != "passed" and score.get("final_status") == "passed":
+            score["final_status"] = "needs_review"
+            score["release_gate_reasons"] = list(gate.reasons)
+            write_json(score_path, score)
+        store.save(task)
+    elif task.execution_mode == "auto":
+        gate = evaluate_release_gate(task, fusion, {})
+        write_json(run_root / "release_gate.json", gate.to_dict())
+        task.artifacts["release_gate"] = "release_gate.json"
         store.save(task)
     if task.status == "generating":
         task = store.advance(task.run_id, "scoring")

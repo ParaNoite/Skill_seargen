@@ -2,7 +2,7 @@
 
 `skill_seargen`（search and generate）是一个本地 Python CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并建立主题研究任务的可恢复底座。
 
-当前版本为 v1.0。它把 v0.2 至 v0.9 的可靠性、主题任务、搜索确认、来源处理、多来源融合、技术 skill 生成和人工复核能力收束为本地 Search + Generate 工作台；固定 10 主题离线回归集用于验证主题创建、候选搜索和审计契约。
+当前版本为 v1.1。它在 v1.0 Search + Generate 工作台上增加模糊主题语义计划、手动确认与自动执行模式、保守自动发布门槛、统一工作项/运营指标/结果查询 API，以及运营、研究、结果三个前端模块。
 
 ## 项目文档
 
@@ -17,6 +17,7 @@
 - [docs/v0.7-closure.md](docs/v0.7-closure.md)：v0.7 技术模式与 GitHub 来源结项与验收说明。
 - [docs/v0.8-closure.md](docs/v0.8-closure.md)：v0.8 多来源证据融合结项与验收说明。
 - [docs/v0.9-closure.md](docs/v0.9-closure.md)：v0.9 技术 skill 生成、评分、复核与重跑验收说明。
+- [docs/v1.1-closure.md](docs/v1.1-closure.md)：v1.1 研究自动化、API 与前端工作台验收说明。
 - [docs/testing.md](docs/testing.md)：测试规范。
 
 ## 安装
@@ -109,6 +110,8 @@ skill-gather topic resume <topic-run-id> --runs ./runs
 skill-gather topic rerun <topic-run-id> --runs ./runs --stage generating
 skill-gather topic review <topic-run-id> --runs ./runs --label needs_changes --notes "补充边界说明"
 ```
+
+Web API 创建主题时可传 `execution_mode: "manual" | "auto"`。模糊主题会持久化结构化 `plan`；手动模式通过 `/api/topics/<run-id>/plan/confirm` 确认后搜索，自动模式可通过 `/api/topics/<run-id>/auto` 推进搜索、选源和处理。统一运营入口为 `/api/work-items`、`/api/metrics` 和 `/api/results`。
 
 也可以通过模块方式调用：
 

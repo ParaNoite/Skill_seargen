@@ -45,6 +45,8 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 | CLI | `src/skill_gather/cli.py` | 命令入口、参数解析、面向用户的错误语义 |
 | 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、评分结果 |
 | 主题任务 | `src/skill_gather/topics.py` | 主题 run 的持久化、状态推进、预算用量、失败审计与恢复 |
+| 语义计划 | `src/skill_gather/planning.py` | 模糊主题判定、结构化语义方案、规则降级与确认 |
+| 研究自动化 | `src/skill_gather/automation.py` | 预算内多样化选源与保守自动发布门槛 |
 | 主题证据融合 | `src/skill_gather/pipeline/topic_fusion.py` | 网页、视频和 GitHub 证据的结论级融合、冲突与缺口记录 |
 | 技术主题生成 | `src/skill_gather/distillers/technical_skill.py` | 技术主题 `SKILL.md`、references、分维度评分与人工复核 |
 | 来源适配 | `src/skill_gather/adapters/` | B站、未来 YouTube 等平台适配 |

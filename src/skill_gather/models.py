@@ -9,24 +9,30 @@ RunStatus = Literal["created", "running", "completed", "failed"]
 TopicMode = Literal["normal", "technical"]
 TopicStatus = Literal[
     "created",
+    "planning",
+    "awaiting_plan_confirmation",
     "searching",
     "awaiting_selection",
     "processing_sources",
     "generating",
     "scoring",
     "completed",
+    "paused",
     "failed",
 ]
 
 
 TOPIC_RUN_STATUSES: set[str] = {
     "created",
+    "planning",
+    "awaiting_plan_confirmation",
     "searching",
     "awaiting_selection",
     "processing_sources",
     "generating",
     "scoring",
     "completed",
+    "paused",
     "failed",
 }
 JUDGE_DIFFICULTIES = ("lenient", "standard", "strict", "off")
@@ -191,6 +197,64 @@ class TopicCachePolicy:
 
 
 @dataclass(slots=True)
+class SemanticPlanOption:
+    option_id: str
+    label: str
+    goal: str
+    exclusions: list[str] = field(default_factory=list)
+    facets: list[str] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    rationale: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "SemanticPlanOption":
+        return cls(**value)
+
+
+@dataclass(slots=True)
+class SemanticPlan:
+    ambiguous: bool
+    ambiguity_reasons: list[str] = field(default_factory=list)
+    options: list[SemanticPlanOption] = field(default_factory=list)
+    recommended_option_id: str = ""
+    selected_option_id: str | None = None
+    goal: str = ""
+    exclusions: list[str] = field(default_factory=list)
+    facets: list[str] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    generation_method: str = "deterministic"
+    audit_status: str = "pending"
+    warning: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["options"] = [option.to_dict() for option in self.options]
+        return result
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> "SemanticPlan | None":
+        if not isinstance(value, dict):
+            return None
+        return cls(
+            ambiguous=bool(value.get("ambiguous", False)),
+            ambiguity_reasons=list(value.get("ambiguity_reasons", [])),
+            options=[SemanticPlanOption.from_dict(item) for item in value.get("options", [])],
+            recommended_option_id=str(value.get("recommended_option_id", "")),
+            selected_option_id=value.get("selected_option_id"),
+            goal=str(value.get("goal", "")),
+            exclusions=list(value.get("exclusions", [])),
+            facets=list(value.get("facets", [])),
+            queries=list(value.get("queries", [])),
+            generation_method=str(value.get("generation_method", "deterministic")),
+            audit_status=str(value.get("audit_status", "pending")),
+            warning=str(value.get("warning", "")),
+        )
+
+
+@dataclass(slots=True)
 class TopicUsage:
     candidate_count: int = 0
     selected_source_count: int = 0
@@ -305,6 +369,10 @@ class TopicTask:
     usage: TopicUsage = field(default_factory=TopicUsage)
     cache: TopicCachePolicy = field(default_factory=TopicCachePolicy)
     judge_difficulty: str = "standard"
+    execution_mode: str = "manual"
+    plan: SemanticPlan | None = None
+    plan_audit: list[dict[str, Any]] = field(default_factory=list)
+    paused_from: str | None = None
     candidates: list[TopicSourceCandidate] = field(default_factory=list)
     selected_sources: list[TopicSourceCandidate] = field(default_factory=list)
     video_runs: list[TopicVideoRun] = field(default_factory=list)
@@ -324,6 +392,8 @@ class TopicTask:
             raise ValueError("无效的主题任务状态")
         if self.judge_difficulty not in JUDGE_DIFFICULTIES:
             raise ValueError("无效的 Judge 难度")
+        if self.execution_mode not in {"manual", "auto"}:
+            raise ValueError("执行模式必须是 manual 或 auto")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -337,6 +407,10 @@ class TopicTask:
             "usage": self.usage.to_dict(),
             "cache": self.cache.to_dict(),
             "judge_difficulty": self.judge_difficulty,
+            "execution_mode": self.execution_mode,
+            "plan": self.plan.to_dict() if self.plan else None,
+            "plan_audit": list(self.plan_audit),
+            "paused_from": self.paused_from,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "selected_sources": [source.to_dict() for source in self.selected_sources],
             "video_runs": [video_run.to_dict() for video_run in self.video_runs],
@@ -362,6 +436,10 @@ class TopicTask:
             usage=TopicUsage.from_dict(value.get("usage")),
             cache=TopicCachePolicy.from_dict(value.get("cache")),
             judge_difficulty=value.get("judge_difficulty", "standard"),
+            execution_mode=value.get("execution_mode", "manual"),
+            plan=SemanticPlan.from_dict(value.get("plan")),
+            plan_audit=list(value.get("plan_audit", [])),
+            paused_from=value.get("paused_from"),
             candidates=[TopicSourceCandidate.from_dict(item) for item in value.get("candidates", [])],
             selected_sources=[TopicSourceCandidate.from_dict(item) for item in value.get("selected_sources", [])],
             video_runs=[TopicVideoRun.from_dict(item) for item in value.get("video_runs", [])],

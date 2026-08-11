@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>skill_seargen</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -18,8 +19,22 @@
     </div>
   </header>
 
+  <nav class="workspace-nav" aria-label="工作台导航">
+    <button class="nav-tab active" data-view="operations" type="button">运营</button>
+    <button class="nav-tab" data-view="research" type="button">研究</button>
+    <button class="nav-tab" data-view="results" type="button">结果</button>
+  </nav>
+
   <main class="shell">
-    <section class="topic-panel" aria-labelledby="topic-title">
+    <section id="operations-view" class="view-panel" aria-labelledby="operations-title">
+      <div class="section-heading"><div><p class="eyebrow">运营总览</p><h1 id="operations-title">任务队列与运行指标</h1></div><button id="metrics-refresh" class="button secondary" type="button">刷新指标</button></div>
+      <div id="metrics-grid" class="detail-grid"><div class="metric"><div class="metric-label">正在加载</div><div class="metric-value">-</div></div></div>
+    </section>
+    <section id="results-view" class="view-panel" hidden aria-labelledby="results-title">
+      <div class="section-heading"><div><p class="eyebrow">结果浏览器</p><h1 id="results-title">知识包与 Skill</h1></div><select id="results-status" aria-label="结果状态"><option value="all">全部状态</option><option value="passed">通过</option><option value="needs_review">待复核</option><option value="failed">失败</option></select></div>
+      <div id="results-list" class="runs-list"><div class="loading">选择结果页签后加载。</div></div>
+    </section>
+    <section class="topic-panel research-view" hidden aria-labelledby="topic-title">
       <div class="topic-heading">
         <div>
           <p class="eyebrow">主题搜索</p>
@@ -31,6 +46,7 @@
             <option value="normal">普通模式</option>
             <option value="technical">技术模式</option>
           </select>
+          <select id="topic-execution-mode" name="execution_mode" aria-label="执行模式"><option value="manual">手动确认</option><option value="auto">自动执行</option></select>
           <label class="check-label"><input id="topic-fake" name="fake" type="checkbox"> 离线 fake</label>
           <button class="button primary" type="submit">创建主题</button>
         </form>
@@ -42,7 +58,7 @@
       </div>
     </section>
 
-    <section class="submit-panel" aria-labelledby="submit-title">
+    <section class="submit-panel research-view" hidden aria-labelledby="submit-title">
       <div>
         <p class="eyebrow">新建采集任务</p>
         <h1 id="submit-title">从视频提炼可复核 Skill</h1>
@@ -78,7 +94,7 @@
       </form>
     </section>
 
-    <section class="workspace">
+    <section class="workspace research-view" hidden>
       <aside class="runs-panel">
         <div class="section-heading">
           <div>

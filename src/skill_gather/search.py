@@ -567,7 +567,14 @@ def search_topic(
         query_audit.append({"provider": "newapi", "query": "", "reason": intent_warning})
     query_audit.extend({"provider": "intent", "query": query, "reason": intent.strategy} for query in intent.query_variants)
     for name in provider_names:
-        queries = build_queries(task.topic, task.mode, name, max_queries=config.search.max_queries, extra_queries=intent.query_variants)
+        plan_queries = task.plan.queries if task.plan and task.plan.audit_status == "confirmed" else []
+        queries = build_queries(
+            task.topic,
+            task.mode,
+            name,
+            max_queries=config.search.max_queries,
+            extra_queries=intent.query_variants + plan_queries,
+        )
         query_audit.extend({"provider": name, "query": query, "reason": "deterministic_template"} for query in queries)
         provider = build_provider(name, config.search, fake_fixtures=fake_fixtures)
         cache_key = _cache_key(name, queries, config.search.per_provider_results)

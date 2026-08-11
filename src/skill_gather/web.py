@@ -12,12 +12,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .cli import handle_topic_process, handle_video
+from .automation import choose_auto_sources
 from .config import load_config
 from .integrations.newapi import resolve_api_key
 from .models import PIPELINE_STAGES
+from .planning import assess_ambiguity
 from .mvp_check import run_mvp_check
 from .runs import RunStore, read_json, safe_slug
 from .search import search_topic as execute_topic_search
@@ -85,7 +87,7 @@ class WebApp:
             payload["job"] = dict(job)
         return payload
 
-    def create_topic(self, topic: str, *, mode: str = "normal", config_path: str | None = None) -> dict[str, Any]:
+    def create_topic(self, topic: str, *, mode: str = "normal", execution_mode: str = "manual", config_path: str | None = None) -> dict[str, Any]:
         topic = topic.strip()
         if not topic:
             raise ValueError("请输入研究主题")
@@ -96,8 +98,105 @@ class WebApp:
             budget=config.topic_defaults.budget,
             cache=config.topic_defaults.cache,
             judge_difficulty=config.topic_defaults.judge_difficulty,
+            execution_mode=execution_mode,
         )
+        assessment = assess_ambiguity(topic, mode)
+        if assessment.ambiguous and task.plan is None:
+            task = self.topic_store.create_plan(task.run_id)
+            if execution_mode == "auto" and task.plan:
+                task = self.topic_store.confirm_plan(task.run_id, task.plan.recommended_option_id)
+        elif not assessment.ambiguous:
+            task.plan_audit.append({"event": "plan_skipped", "reason": "deterministic_topic"})
+            self.topic_store.save(task)
         return task.to_dict()
+
+    def start_auto_topic(self, run_id: str, *, use_fake: bool = False, config_path: str | None = None) -> dict[str, Any]:
+        task = self.topic_store.load(run_id)
+        if task.execution_mode != "auto":
+            raise ValueError("只有 auto 执行模式可以启动自动任务")
+        if task.status == "awaiting_plan_confirmation" and task.plan:
+            task = self.topic_store.confirm_plan(run_id, task.plan.recommended_option_id)
+        if task.status in {"created", "awaiting_selection"}:
+            task = self.topic_store.load(run_id)
+            if task.status == "created":
+                self.search_topic(run_id, use_fake=use_fake, config_path=config_path)
+            task = self.topic_store.load(run_id)
+            selected_ids = choose_auto_sources(task)
+            if not selected_ids:
+                raise ValueError("自动选源没有找到预算内的可用来源")
+            task.plan_audit.append({"event": "auto_sources_selected", "candidate_ids": selected_ids})
+            self.topic_store.save(task)
+            self.select_topic(run_id, selected_ids)
+        return self.process_topic(run_id, config_path=config_path)
+
+    def get_plan(self, run_id: str) -> dict[str, Any]:
+        task = self.topic_store.load(run_id)
+        return {"run_id": run_id, "plan": task.plan.to_dict() if task.plan else None, "audit": task.plan_audit}
+
+    def confirm_plan(self, run_id: str, option_id: str, edited: dict[str, object] | None = None) -> dict[str, Any]:
+        return self.topic_store.confirm_plan(run_id, option_id, edited=edited).to_dict()
+
+    def interrupt_plan(self, run_id: str) -> dict[str, Any]:
+        return self.topic_store.interrupt_plan(run_id).to_dict()
+
+    def pause_topic(self, run_id: str) -> dict[str, Any]:
+        return self.topic_store.pause(run_id).to_dict()
+
+    def retry_topic(self, run_id: str) -> dict[str, Any]:
+        task = self.topic_store.load(run_id)
+        if task.status == "paused":
+            return self.topic_store.resume_paused(run_id).to_dict()
+        if task.status == "failed":
+            return self.topic_store.resume(run_id).to_dict()
+        raise ValueError("只有暂停或失败的主题任务可以重试")
+
+    def list_work_items(self) -> list[dict[str, Any]]:
+        return [{**item, "kind": "video"} for item in self.list_runs()] + [{**item, "kind": "topic"} for item in self.list_topics()]
+
+    def get_work_item(self, run_id: str) -> dict[str, Any]:
+        if self.topic_store.state_path(run_id).exists():
+            return {**self.get_topic(run_id), "kind": "topic"}
+        return {**self.get_run(run_id), "kind": "video"}
+
+    def metrics(self) -> dict[str, Any]:
+        items = self.list_work_items()
+        counts: dict[str, int] = {}
+        for item in items:
+            status = str(item.get("status", "unknown"))
+            counts[status] = counts.get(status, 0) + 1
+        return {"total": len(items), "by_status": counts, "active_jobs": sum(1 for job in [*self._jobs.values(), *self._topic_jobs.values()] if job.get("active"))}
+
+    def results(self, *, result_type: str = "all", status: str = "all", min_score: int = 0, risk: str = "") -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        if result_type in {"all", "video"}:
+            for item in self.list_runs():
+                if item.get("status") not in {"completed", "failed"}:
+                    continue
+                if status != "all" and item.get("status") != status:
+                    continue
+                detail = self.get_run(item["run_id"])
+                score = int(detail.get("score", {}).get("final_score", 0) or 0)
+                risks = detail.get("risk_flags", [])
+                if score < min_score or (risk and risk not in risks):
+                    continue
+                results.append({**item, "kind": "video", "score": score, "risk_flags": risks})
+        if result_type in {"all", "topic", "skill"}:
+            for item in self.list_topics():
+                if item.get("status") not in {"completed", "failed"}:
+                    continue
+                if status != "all" and item.get("status") != status:
+                    continue
+                detail = self.get_topic(item["run_id"])
+                score_payload: dict[str, Any] = {}
+                score_path = detail.get("artifacts", {}).get("score")
+                if score_path:
+                    score_payload = self._optional_json(self.topic_store.run_path(item["run_id"]) / score_path)
+                score = int(score_payload.get("final_score", 0) or 0)
+                risks = detail.get("fusion", {}).get("risk_flags", []) if isinstance(detail.get("fusion"), dict) else []
+                if score < min_score or (risk and risk not in risks):
+                    continue
+                results.append({**item, "kind": "topic", "score": score, "risk_flags": risks})
+        return results
 
     def search_topic(self, run_id: str, *, use_fake: bool = False, config_path: str | None = None) -> dict[str, Any]:
         config = load_config(config_path or self.config_path)
@@ -353,6 +452,11 @@ class WebApp:
             "topic": state.get("topic", ""),
             "mode": state.get("mode", "normal"),
             "status": state.get("status", "created"),
+            "current_stage": state.get("current_stage", "created"),
+            "execution_mode": state.get("execution_mode", "manual"),
+            "budget": state.get("budget", {}),
+            "usage": state.get("usage", {}),
+            "failure_reason": state.get("failure_reason"),
             "candidate_count": len(state.get("candidates", [])),
             "selected_source_count": len(state.get("selected_sources", [])),
             "updated_at": state.get("updated_at", ""),
@@ -395,12 +499,42 @@ def serve(**kwargs: Any) -> None:
 def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
     class RequestHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            path = urlsplit(self.path).path
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+            if path == "/api/work-items":
+                self._send_json({"items": app.list_work_items()})
+                return
+            if path.startswith("/api/work-items/"):
+                run_id = unquote(path.removeprefix("/api/work-items/"))
+                try:
+                    self._send_json(app.get_work_item(run_id))
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                return
+            if path == "/api/metrics":
+                self._send_json(app.metrics())
+                return
+            if path == "/api/results":
+                self._send_json({"results": app.results(
+                    result_type=query.get("type", ["all"])[0],
+                    status=query.get("status", ["all"])[0],
+                    min_score=int(query.get("min_score", ["0"])[0]),
+                    risk=query.get("risk", [""])[0],
+                )})
+                return
             if path == "/api/runs":
                 self._send_json({"runs": app.list_runs()})
                 return
             if path == "/api/topics":
                 self._send_json({"topics": app.list_topics()})
+                return
+            if path.startswith("/api/topics/") and path.endswith("/plan"):
+                run_id = unquote(path.removeprefix("/api/topics/").removesuffix("/plan").strip("/"))
+                try:
+                    self._send_json(app.get_plan(run_id))
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
                 return
             if path.startswith("/api/topics/"):
                 run_id = unquote(path.removeprefix("/api/topics/"))
@@ -463,6 +597,7 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     result = app.create_topic(
                         str(body.get("topic", "")),
                         mode=str(body.get("mode", "normal")),
+                        execution_mode=str(body.get("execution_mode", "manual")),
                         config_path=str(body.get("config", "")) or None,
                     )
                     self._send_json(result, HTTPStatus.CREATED)
@@ -473,6 +608,30 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                         run_id = suffix.removesuffix("/search").strip("/")
                         result = app.search_topic(run_id, use_fake=bool(body.get("fake", False)), config_path=str(body.get("config", "")) or None)
                         self._send_json(result, HTTPStatus.OK)
+                        return
+                    if suffix.endswith("/plan/confirm"):
+                        run_id = suffix.removesuffix("/plan/confirm").strip("/")
+                        edited = body.get("edited")
+                        if edited is not None and not isinstance(edited, dict):
+                            raise ValueError("edited 必须是对象")
+                        self._send_json(app.confirm_plan(run_id, str(body.get("option_id", "")), edited=edited))
+                        return
+                    if suffix.endswith("/plan/interrupt"):
+                        run_id = suffix.removesuffix("/plan/interrupt").strip("/")
+                        self._send_json(app.interrupt_plan(run_id))
+                        return
+                    if suffix.endswith("/auto"):
+                        run_id = suffix.removesuffix("/auto").strip("/")
+                        result = app.start_auto_topic(run_id, use_fake=bool(body.get("fake", False)), config_path=str(body.get("config", "")) or None)
+                        self._send_json(result, HTTPStatus.ACCEPTED)
+                        return
+                    if suffix.endswith("/pause"):
+                        run_id = suffix.removesuffix("/pause").strip("/")
+                        self._send_json(app.pause_topic(run_id))
+                        return
+                    if suffix.endswith("/retry"):
+                        run_id = suffix.removesuffix("/retry").strip("/")
+                        self._send_json(app.retry_topic(run_id))
                         return
                     if suffix.endswith("/select"):
                         run_id = suffix.removesuffix("/select").strip("/")

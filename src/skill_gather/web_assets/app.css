@@ -19,6 +19,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -62,6 +63,11 @@ button { cursor: pointer; }
 }
 
 .top-actions { gap: 14px; }
+.workspace-nav { height: 46px; padding: 0 max(24px, calc((100vw - 1440px) / 2 + 28px)); display: flex; gap: 22px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.nav-tab { min-width: 64px; padding: 0 4px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-weight: 650; }
+.nav-tab.active { border-bottom-color: var(--green); color: var(--green-dark); }
+.view-panel { margin-bottom: 18px; padding: 24px 28px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.view-panel .detail-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .local-status { color: var(--muted); font-size: 13px; }
 .local-status i {
   display: inline-block;
@@ -306,6 +312,7 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
   .topbar { padding: 0 16px; }
   .local-status { display: none; }
   .shell { padding: 16px; }
+  .view-panel .section-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
   .topic-panel { padding: 21px 18px 0; }
   .topic-workspace { display: block; }
   .topics-list { border-right: 0; border-bottom: 1px solid var(--line); }

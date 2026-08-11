@@ -12,6 +12,7 @@ const state = { runs: [], selectedId: null, timer: null };
 const runPollState = { inFlight: false };
 const topicState = { topics: [], selectedId: null };
 const topicPollState = { inFlight: false };
+const viewPanels = { operations: document.querySelector("#operations-view"), results: document.querySelector("#results-view") };
 const runsList = document.querySelector("#runs-list");
 const detailPanel = document.querySelector("#detail-panel");
 const topicsList = document.querySelector("#topics-list");
@@ -27,6 +28,39 @@ const modelsPanel = document.querySelector("#models-panel");
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }
+
+function setView(view) {
+  Object.entries(viewPanels).forEach(([name, panel]) => { if (panel) panel.hidden = name !== view; });
+  document.querySelectorAll(".research-view").forEach(panel => { panel.hidden = view !== "research"; });
+  document.querySelectorAll(".nav-tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === view));
+  if (view === "operations") loadMetrics();
+  if (view === "results") loadResults();
+}
+
+async function loadMetrics() {
+  const grid = document.querySelector("#metrics-grid");
+  if (!grid) return;
+  try {
+    const data = await request("/api/metrics");
+    const statuses = Object.entries(data.by_status || {}).map(([key, value]) => `<div class="metric"><div class="metric-label">${escapeHtml(key)}</div><div class="metric-value">${Number(value) || 0}</div></div>`).join("");
+    grid.innerHTML = `<div class="metric"><div class="metric-label">任务总数</div><div class="metric-value">${Number(data.total) || 0}</div></div><div class="metric"><div class="metric-label">活动作业</div><div class="metric-value">${Number(data.active_jobs) || 0}</div></div>${statuses}`;
+  } catch (error) { grid.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
+}
+
+async function loadResults() {
+  const target = document.querySelector("#results-list");
+  if (!target) return;
+  target.innerHTML = '<div class="loading">正在加载结果...</div>';
+  try {
+    const status = document.querySelector("#results-status")?.value || "all";
+    const data = await request(`/api/results?status=${encodeURIComponent(status)}`);
+    target.innerHTML = data.results?.length ? data.results.map(item => `<div class="run-item"><div class="run-top"><span class="run-meta">${escapeHtml(item.kind)}</span>${statusBadge(item.status)}</div><div class="run-title">${escapeHtml(item.title || item.topic || item.run_id)}</div><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div></div>`).join("") : '<div class="loading">暂无匹配结果。</div>';
+  } catch (error) { target.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
+}
+
+document.querySelectorAll(".nav-tab").forEach(tab => tab.addEventListener("click", () => setView(tab.dataset.view)));
+document.querySelector("#metrics-refresh")?.addEventListener("click", loadMetrics);
+document.querySelector("#results-status")?.addEventListener("change", loadResults);
 
 function displayVisionReason(reason) {
   if (reason === "newapi API key is not configured") return "未配置 NewAPI API key";
@@ -87,7 +121,7 @@ function renderTopics() {
     topicsList.innerHTML = '<div class="loading compact">还没有主题任务。</div>';
     return;
   }
-  const labels = { created: "未搜索", searching: "搜索中", awaiting_selection: "待确认", processing_sources: "处理中", generating: "生成中", scoring: "评分中", completed: "已完成", failed: "失败" };
+  const labels = { created: "未搜索", planning: "规划中", awaiting_plan_confirmation: "待语义确认", searching: "搜索中", awaiting_selection: "待确认", processing_sources: "处理中", generating: "生成中", scoring: "评分中", paused: "已暂停", completed: "已完成", failed: "失败" };
   topicsList.innerHTML = topicState.topics.map(topic => `
     <button class="topic-item ${topic.run_id === topicState.selectedId ? "active" : ""}" type="button" data-topic-id="${escapeHtml(topic.run_id)}">
       <div class="topic-item-title">${escapeHtml(topic.topic)}</div>
@@ -114,9 +148,11 @@ function renderTopic(topic) {
   const fusionConflicts = fusion.conflicts || [];
   const fusionGaps = fusion.evidence_gaps || [];
   const budget = topic.budget || {};
+  const plan = topic.plan || null;
   const cache = topic.cache || {};
   const budgetSummary = `<span class="muted">预算：候选 ${Number(budget.max_candidates) || 0} · 处理来源 ${Number(budget.max_selected_sources) || 0} · 最长 ${Number(budget.max_runtime_sec) || 0} 秒 · 缓存 ${cache.reuse_cache ? "复用" : "关闭"}</span>`;
   const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
+  const autoButton = topic.execution_mode === "auto" && topic.status === "created" ? '<button id="topic-auto-button" class="button primary" type="button">启动自动执行</button>' : "";
   const selectButton = topic.status === "awaiting_selection" && candidates.length ? '<button id="topic-select-button" class="button primary" type="button">确认选择</button>' : "";
   const retryButton = topic.status === "failed" ? '<button id="topic-retry-button" class="button secondary" type="button">恢复后重试</button>' : "";
   const processButton = topic.status === "processing_sources" && !job.active ? '<button id="topic-process-button" class="button primary" type="button">开始处理已选来源</button>' : "";
@@ -142,8 +178,10 @@ function renderTopic(topic) {
       ${topic.artifacts?.fusion ? `<div class="topic-video-runs"><strong>证据融合</strong><span>${fusionConclusions.length} 条结论 · ${fusionConflicts.length} 条冲突 · ${fusionGaps.length} 个缺口</span>${fusionConflicts.map(item => `<span>待复核：${escapeHtml(item.summary || "来源结论冲突")}</span>`).join("")}</div>` : ""}
       ${videoRunSummary}
     </section>` : "";
+  const planPanel = topic.status === "awaiting_plan_confirmation" && plan ? `<section class="topic-confirmation"><div><strong>确认研究语义</strong><span>${escapeHtml((plan.ambiguity_reasons || []).join("；"))}</span></div><div class="candidate-list">${(plan.options || []).map(option => `<button class="candidate-card" type="button" data-plan-option="${escapeHtml(option.option_id)}"><span><span class="candidate-title">${escapeHtml(option.label)}</span><span class="candidate-summary">${escapeHtml(option.goal)}</span><span class="candidate-meta">${escapeHtml((option.facets || []).join(" · "))}</span></span>${option.option_id === plan.recommended_option_id ? '<span class="status completed">推荐</span>' : ""}</button>`).join("")}</div></section>` : "";
   topicDetail.innerHTML = `
-    <div class="topic-actions">${searchButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)}</span>${budgetSummary}</div>
+    <div class="topic-actions">${searchButton}${autoButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)} · ${escapeHtml(topic.execution_mode || "manual")}</span>${budgetSummary}</div>
+    ${planPanel}
     ${confirmation}
     ${outcome}
     ${candidates.length ? `<div class="candidate-list">${candidates.map(candidate => `
@@ -160,6 +198,22 @@ function renderTopic(topic) {
       await loadTopics();
       await selectTopic(topic.run_id);
     } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; searchButtonNode.disabled = false; searchButtonNode.textContent = "搜索候选"; }
+  });
+  topicDetail.querySelectorAll("[data-plan-option]").forEach(button => button.addEventListener("click", async () => {
+    try {
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/plan/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option_id: button.dataset.planOption }) });
+      await loadTopics();
+      await selectTopic(topic.run_id);
+    } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; }
+  }));
+  const autoButtonNode = document.querySelector("#topic-auto-button");
+  if (autoButtonNode) autoButtonNode.addEventListener("click", async () => {
+    autoButtonNode.disabled = true;
+    try {
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/auto`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fake: document.querySelector("#topic-fake")?.checked || false }) });
+      await loadTopics();
+      await selectTopic(topic.run_id);
+    } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; autoButtonNode.disabled = false; }
   });
   const selectButtonNode = document.querySelector("#topic-select-button");
   if (selectButtonNode) selectButtonNode.addEventListener("click", async () => {
@@ -363,7 +417,7 @@ topicForm?.addEventListener("submit", async event => {
   topicMessage.className = "form-message";
   topicMessage.textContent = "正在创建主题...";
   try {
-    const result = await request("/api/topics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ topic: topicForm.elements.topic.value, mode: topicForm.elements.mode.value }) });
+    const result = await request("/api/topics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ topic: topicForm.elements.topic.value, mode: topicForm.elements.mode.value, execution_mode: topicForm.elements.execution_mode.value }) });
     topicForm.elements.topic.value = "";
     topicMessage.textContent = "主题已创建，请在右侧启动搜索。";
     topicState.selectedId = result.run_id;
@@ -457,5 +511,6 @@ async function pollTopics() {
 }
 
 loadRuns(true);
+loadMetrics();
 state.timer = window.setInterval(poll, 3000);
 window.setInterval(pollTopics, 3000);

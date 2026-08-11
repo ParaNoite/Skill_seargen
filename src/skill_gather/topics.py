@@ -13,17 +13,21 @@ from .models import (
     TopicTask,
     TopicUsage,
 )
+from .planning import apply_plan, build_deterministic_plan
 from .runs import read_json, safe_slug, write_json
 
 
 _ALLOWED_TRANSITIONS = {
-    "created": {"searching", "failed"},
+    "created": {"planning", "searching", "failed"},
+    "planning": {"awaiting_plan_confirmation", "searching", "failed"},
+    "awaiting_plan_confirmation": {"searching", "failed"},
     "searching": {"awaiting_selection", "failed"},
     "awaiting_selection": {"processing_sources", "failed"},
     "processing_sources": {"generating", "failed"},
     "generating": {"scoring", "failed"},
     "scoring": {"completed", "failed"},
     "completed": set(),
+    "paused": {"planning", "searching", "processing_sources", "generating", "scoring", "failed"},
     "failed": set(),
 }
 
@@ -54,6 +58,7 @@ class TopicRunStore:
         budget: TopicBudget | None = None,
         cache: TopicCachePolicy | None = None,
         judge_difficulty: str = "standard",
+        execution_mode: str = "manual",
     ) -> TopicTask:
         run_id = self.run_id_for(topic, mode, output_language)
         if self.state_path(run_id).exists():
@@ -68,6 +73,7 @@ class TopicRunStore:
             budget=budget or TopicBudget(),
             cache=cache or TopicCachePolicy(),
             judge_difficulty=judge_difficulty,
+            execution_mode=execution_mode,
             package=TopicPackage(
                 root=package_root,
                 sources=f"{package_root}/sources.json",
@@ -85,6 +91,61 @@ class TopicRunStore:
             },
         )
         self._create_package_layout(task)
+        self.save(task)
+        return task
+
+    def create_plan(self, run_id: str, *, warning: str = "") -> TopicTask:
+        task = self.load(run_id)
+        task.plan = build_deterministic_plan(task, warning=warning)
+        task.plan_audit.append({"event": "plan_generated", "method": task.plan.generation_method, "ambiguous": task.plan.ambiguous})
+        if task.plan.ambiguous:
+            task.status = "awaiting_plan_confirmation"
+            task.current_stage = "awaiting_plan_confirmation"
+        else:
+            task.status = "created"
+            task.current_stage = "created"
+        self.save(task)
+        return task
+
+    def confirm_plan(self, run_id: str, option_id: str, *, edited: dict[str, object] | None = None) -> TopicTask:
+        task = self.load(run_id)
+        if task.plan is None or task.status != "awaiting_plan_confirmation":
+            raise ValueError("当前主题没有等待确认的语义计划")
+        task.plan = apply_plan(task, task.plan, option_id, edited=edited)
+        task.plan_audit.append({"event": "plan_confirmed", "option_id": option_id, "edited": bool(edited)})
+        task.status = "created"
+        task.current_stage = "created"
+        self.save(task)
+        return task
+
+    def interrupt_plan(self, run_id: str, reason: str = "用户中断计划生成") -> TopicTask:
+        task = self.load(run_id)
+        if task.plan is None:
+            task.plan = build_deterministic_plan(task, warning="plan_interrupted")
+        task.plan.warning = "plan_interrupted"
+        task.plan.audit_status = "needs_confirmation"
+        task.plan_audit.append({"event": "plan_interrupted", "reason": reason})
+        task.status = "awaiting_plan_confirmation"
+        task.current_stage = "awaiting_plan_confirmation"
+        self.save(task)
+        return task
+
+    def pause(self, run_id: str) -> TopicTask:
+        task = self.load(run_id)
+        if task.status in {"completed", "failed", "paused"}:
+            raise ValueError("当前主题任务不能暂停")
+        task.paused_from = task.status
+        task.status = "paused"
+        self.save(task)
+        return task
+
+    def resume_paused(self, run_id: str) -> TopicTask:
+        task = self.load(run_id)
+        if task.status != "paused":
+            raise ValueError("当前主题任务不是暂停状态")
+        task.status = task.paused_from or "created"
+        task.current_stage = task.status
+        task.paused_from = None
         self.save(task)
         return task
 
