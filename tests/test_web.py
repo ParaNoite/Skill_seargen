@@ -27,6 +27,33 @@ CONFIG = {
 
 
 class WebAppTests(unittest.TestCase):
+    def test_llm_plan_can_be_interrupted_without_late_response_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            release = threading.Event()
+
+            class Client:
+                def build_search_intent(self, topic, mode, model):
+                    release.wait(timeout=2)
+                    return {"goal": "迟到响应", "facets": [], "exclusions": [], "queries": []}
+
+            with patch("skill_gather.web.NewApiClient.from_config", return_value=Client()):
+                created = app.create_topic("教程")
+                interrupted = app.interrupt_plan(created["run_id"])
+                release.set()
+                for _ in range(50):
+                    if not app.get_plan(created["run_id"])["job"].get("active"):
+                        break
+                    time.sleep(0.01)
+
+            final_plan = app.get_plan(created["run_id"])["plan"]
+            self.assertEqual(interrupted["plan"]["warning"], "plan_interrupted")
+            self.assertEqual(final_plan["warning"], "plan_interrupted")
+            self.assertNotEqual(final_plan["goal"], "迟到响应")
+
     def test_topic_detail_exposes_fusion_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -127,6 +154,33 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(app.list_work_items()[0]["execution_mode"], "manual")
             self.assertIn("model_availability", app.metrics())
 
+    def test_result_browser_reads_skill_content_and_filters_normal_topics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            technical = app.create_topic("Godot NavigationAgent3D", mode="technical")
+            task = app.topic_store.load(technical["run_id"])
+            task.status = "completed"
+            task.current_stage = "completed"
+            task.artifacts.update({"skill": "topic_package/SKILL.md", "score": "topic_package/score.json"})
+            run_root = app.topic_store.run_path(task.run_id)
+            (run_root / "topic_package/SKILL.md").write_text("# Skill content", encoding="utf-8")
+            (run_root / "topic_package/score.json").write_text(json.dumps({"final_score": 88, "final_status": "passed"}), encoding="utf-8")
+            app.topic_store.save(task)
+            normal = app.create_topic("Godot NavigationAgent2D", mode="normal")
+            normal_task = app.topic_store.load(normal["run_id"])
+            normal_task.status = "completed"
+            normal_task.current_stage = "completed"
+            app.topic_store.save(normal_task)
+
+            skills = app.results(result_type="skill", status="passed")
+            detail = app.get_result(task.run_id)
+
+            self.assertEqual([item["run_id"] for item in skills], [task.run_id])
+            self.assertEqual(detail["skill"], "# Skill content")
+
     def test_lists_and_reads_existing_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -223,11 +277,15 @@ class WebHttpTests(unittest.TestCase):
 
     def test_serves_frontend_and_empty_run_list(self):
         page_status, page_type, page = self.request("GET", "/")
+        react_status, react_type, react_bundle = self.request("GET", "/react-nav.js")
         api_status, api_type, payload = self.request("GET", "/api/runs")
 
         self.assertEqual(page_status, 200)
         self.assertIn("text/html", page_type)
         self.assertIn("skill_seargen", page.decode("utf-8"))
+        self.assertEqual(react_status, 200)
+        self.assertIn("text/javascript", react_type)
+        self.assertGreater(len(react_bundle), 1000)
         self.assertEqual(api_status, 200)
         self.assertIn("application/json", api_type)
         self.assertEqual(json.loads(payload), {"runs": []})
@@ -273,6 +331,34 @@ class WebHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(payload)["status"], "processing_sources")
+
+    def test_v11_http_plan_pause_retry_and_unified_endpoints(self):
+        headers = {"Content-Type": "application/json"}
+        status, _, payload = self.request(
+            "POST", "/api/topics", body=json.dumps({"topic": "教程", "execution_mode": "manual"}), headers=headers
+        )
+        self.assertEqual(status, 201)
+        created = json.loads(payload)
+        run_id = created["run_id"]
+        self.assertEqual(created["status"], "awaiting_plan_confirmation")
+
+        status, _, payload = self.request("GET", f"/api/topics/{run_id}/plan")
+        plan = json.loads(payload)["plan"]
+        self.assertEqual(status, 200)
+        status, _, payload = self.request(
+            "POST",
+            f"/api/topics/{run_id}/plan/confirm",
+            body=json.dumps({"option_id": plan["recommended_option_id"], "edited": {"goal": "HTTP 确认目标"}}),
+            headers=headers,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["plan"]["goal"], "HTTP 确认目标")
+        self.assertEqual(self.request("POST", f"/api/topics/{run_id}/pause", body="{}", headers=headers)[0], 200)
+        self.assertEqual(self.request("POST", f"/api/topics/{run_id}/retry", body="{}", headers=headers)[0], 200)
+        self.assertEqual(self.request("GET", "/api/work-items")[0], 200)
+        self.assertEqual(self.request("GET", f"/api/work-items/{run_id}")[0], 200)
+        self.assertEqual(self.request("GET", "/api/metrics")[0], 200)
+        self.assertEqual(self.request("GET", "/api/results?type=topic&status=needs_review")[0], 200)
 
     def test_accepts_api_key_for_current_process_without_echoing_it(self):
         status, _, payload = self.request(

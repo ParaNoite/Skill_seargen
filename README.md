@@ -168,6 +168,13 @@ SearXNG 是独立的 AGPL-3.0 本地服务。本项目只调用其 JSON HTTP 接
 
 临时 Web 界面覆盖主题创建、fake/真实搜索、候选卡片、风险和质量分、来源确认，以及原有的视频提交、run 列表、处理进度、证据查看、评分查看和 MVP 自检。处理逻辑仍复用同一主题服务层和 CLI 管线。
 
+导航与视图状态使用 React 19，并由 Vite 构建为 Python 包内的静态资源。修改 `frontend/` 后运行：
+
+```powershell
+npm install
+npm run frontend:build
+```
+
 推荐开发启动入口：
 
 ```powershell

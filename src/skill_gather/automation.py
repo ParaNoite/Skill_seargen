@@ -72,3 +72,13 @@ def persist_release_gate(task: TopicTask, run_root: Path, fusion: dict[str, Any]
         if task.package and task.package.score:
             write_json(run_root / task.package.score, score)
     return decision
+
+
+def persist_video_release_gate(run_root: Path, score: dict[str, Any]) -> ReleaseDecision:
+    decision = ReleaseDecision("needs_review", ("单视频缺少交叉证据",))
+    if score.get("final_status") == "passed":
+        score["final_status"] = decision.status
+        score["release_gate_reasons"] = list(decision.reasons)
+        write_json(run_root / "score.json", score)
+    write_json(run_root / "release_gate.json", decision.to_dict())
+    return decision

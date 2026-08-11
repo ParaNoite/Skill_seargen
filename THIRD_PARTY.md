@@ -12,6 +12,9 @@
 | SearXNG | 本地多引擎通用搜索 | independent-service / HTTP JSON | https://github.com/searxng/searxng | 用户部署版本；不得用浮动 tag 作为发布标识 | AGPL-3.0 | 否 | v0.4 只调用 `/search?format=json`；不复制源码、不捆绑镜像 |
 | GitHub REST API | 技术模式公开仓库候选发现 | external-service / HTTP JSON | https://docs.github.com/en/rest/search/search | API 版本由请求头/官方接口决定 | GitHub 服务条款 | 否 | 默认无 token；可选 `GITHUB_TOKEN` 只用于提高配额 |
 | Bilibili public search endpoint | 普通/技术主题视频候选发现 | external-service / HTTP JSON | https://www.bilibili.com/ | 公共接口行为可能变化 | 平台服务 | 否 | v0.4 不使用 cookie、登录、浏览器自动化或验证码绕过 |
+| React / React DOM | v1.1 Web 工作台导航与视图状态 | npm-dependency / bundled frontend | https://github.com/facebook/react | `19.1.1` | MIT | 仅构建产物 | Vite 构建为 `web_assets/react-nav.js`；`node_modules` 不入仓 |
+| Vite | React 前端生产构建 | npm-dev-dependency | https://github.com/vitejs/vite | `8.2.1` | MIT | 否 | 仅构建期使用；`npm audit` 为 0 漏洞 |
+| @vitejs/plugin-react | Vite React JSX 转换 | npm-dev-dependency | https://github.com/vitejs/vite-plugin-react | `6.0.5` | MIT | 否 | 仅构建期使用 |
 | kangarooking/cangjie-skill | RIA++ skill 蒸馏参考 | reference-only | 待补充 | 待确认 | 待确认 | 否 | 许可证确认前只参考，不复制 |
 
 新增第三方前必须补齐：

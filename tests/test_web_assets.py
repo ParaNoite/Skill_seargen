@@ -4,6 +4,16 @@ import unittest
 
 
 class WebAssetRegressionTests(unittest.TestCase):
+    def test_react_navigation_is_built_with_three_workspace_views(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "frontend" / "nav.jsx").read_text(encoding="utf-8")
+        bundle = (root / "src" / "skill_gather" / "web_assets" / "react-nav.js")
+        self.assertIn('createRoot(root).render(<WorkspaceNav />)', source)
+        self.assertIn('["operations", "运营"]', source)
+        self.assertIn('["research", "研究"]', source)
+        self.assertIn('["results", "结果"]', source)
+        self.assertTrue(bundle.exists())
+
     def test_video_polling_only_refreshes_selected_active_run_and_serializes_requests(self):
         asset = _read_app_js()
 
@@ -17,7 +27,7 @@ class WebAssetRegressionTests(unittest.TestCase):
         asset = _read_app_js()
 
         self.assertIn(
-            'const TOPIC_POLL_STATUSES = new Set(["processing_sources", "generating", "scoring"]);',
+            'const TOPIC_POLL_STATUSES = new Set(["awaiting_plan_confirmation", "processing_sources", "generating", "scoring"]);',
             asset,
         )
         self.assertRegex(asset, re.compile(r"if \(!current \|\| !TOPIC_POLL_STATUSES\.has\(current\.status\)\) return;"))

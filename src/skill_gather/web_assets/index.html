@@ -19,11 +19,7 @@
     </div>
   </header>
 
-  <nav class="workspace-nav" aria-label="工作台导航">
-    <button class="nav-tab active" data-view="operations" type="button">运营</button>
-    <button class="nav-tab" data-view="research" type="button">研究</button>
-    <button class="nav-tab" data-view="results" type="button">结果</button>
-  </nav>
+  <div id="react-nav"></div>
 
   <main class="shell">
     <section id="operations-view" class="view-panel" aria-labelledby="operations-title">
@@ -32,8 +28,9 @@
       <div id="operations-list" class="runs-list" aria-live="polite"></div>
     </section>
     <section id="results-view" class="view-panel" hidden aria-labelledby="results-title">
-      <div class="section-heading"><div><p class="eyebrow">结果浏览器</p><h1 id="results-title">知识包与 Skill</h1></div><div class="result-filters"><select id="results-type" aria-label="结果类型"><option value="all">全部类型</option><option value="video">视频</option><option value="topic">主题</option><option value="skill">Skill</option></select><select id="results-status" aria-label="结果状态"><option value="all">全部状态</option><option value="passed">通过</option><option value="needs_review">待复核</option><option value="failed">失败</option></select><input id="results-score" type="number" min="0" max="100" value="0" aria-label="最低评分" placeholder="最低评分"><input id="results-risk" aria-label="风险标记" placeholder="风险标记"><input id="results-source" aria-label="来源" placeholder="来源"><button id="results-export" class="button secondary" type="button">导出所选</button></div></div>
+      <div class="section-heading"><div><p class="eyebrow">结果浏览器</p><h1 id="results-title">知识包与 Skill</h1></div><div class="result-filters"><select id="results-type" aria-label="结果类型"><option value="all">全部类型</option><option value="video">视频</option><option value="topic">主题</option><option value="skill">Skill</option></select><select id="results-status" aria-label="结果状态"><option value="all">全部状态</option><option value="passed">通过</option><option value="needs_review">待复核</option><option value="failed">失败</option></select><input id="results-score" type="number" min="0" max="100" value="0" aria-label="最低评分" placeholder="最低评分"><input id="results-risk" aria-label="风险标记" placeholder="风险标记"><input id="results-source" aria-label="来源" placeholder="来源"><button id="results-compare" class="button secondary" type="button">比较所选</button><button id="results-export" class="button secondary" type="button">导出所选</button></div></div>
       <div id="results-list" class="runs-list"><div class="loading">选择结果页签后加载。</div></div>
+      <div id="results-detail" class="result-detail" aria-live="polite"></div>
     </section>
     <section class="topic-panel research-view" hidden aria-labelledby="topic-title">
       <div class="topic-heading">
@@ -119,6 +116,7 @@
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/react-nav.js" type="module"></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

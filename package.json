@@ -6,6 +6,15 @@
     "dev": "scripts\\dev.cmd",
     "web": "scripts\\start-web.cmd",
     "test": ".\\.venv\\Scripts\\python.exe -m unittest discover -s tests",
-    "cli": ".\\.venv\\Scripts\\python.exe -m skill_gather --help"
+    "cli": ".\\.venv\\Scripts\\python.exe -m skill_gather --help",
+    "frontend:build": "vite build"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.5",
+    "vite": "^8.2.1"
   }
 }

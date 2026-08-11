@@ -521,6 +521,8 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
             _print_json({"run_id": task.run_id, "status": task.status, "skill": task.artifacts.get("skill"), "score": task.artifacts.get("score")}, stdout)
             return 0
         web_result = process_web_sources(task, run_root, timeout_sec=args.timeout_sec)
+        if _topic_processing_paused(args, store, task.run_id, stdout):
+            return 0
         selected_videos = [candidate for candidate in task.selected_sources if candidate.source_type == "video"]
         selected_github = [
             candidate
@@ -537,6 +539,8 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
                 vision_mode=args.vision_mode,
                 vision_frame_limit=args.vision_frame_limit,
             )
+            if _topic_processing_paused(args, store, task.run_id, stdout):
+                return 0
             processed_video_ids = {candidate.candidate_id for candidate in selected_videos}
             web_result.skipped = [
                 item for item in web_result.skipped if item.get("candidate_id") not in processed_video_ids
@@ -552,6 +556,8 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
                 timeout_sec=args.timeout_sec,
                 token_env=github_token_env,
             )
+            if _topic_processing_paused(args, store, task.run_id, stdout):
+                return 0
             processed_github_ids = {candidate.candidate_id for candidate in selected_github}
             web_result.skipped = [
                 item for item in web_result.skipped if item.get("candidate_id") not in processed_github_ids
@@ -636,6 +642,17 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
         payload["failure_reason"] = task.failure_reason
     _print_json(payload, stdout)
     return 0 if task.status == "completed" else 1
+
+
+def _topic_processing_paused(args: argparse.Namespace, store: TopicRunStore, run_id: str, stdout: TextIO) -> bool:
+    event = getattr(args, "cancel_event", None)
+    if event is None or not event.is_set():
+        return False
+    task = store.load(run_id)
+    if task.status != "paused":
+        task = store.pause(run_id)
+    _print_json({"run_id": run_id, "status": "paused", "current_stage": task.current_stage}, stdout)
+    return True
 
 
 def _complete_topic_generation(store: TopicRunStore, task: Any, run_root: Path, fusion: dict[str, Any]) -> Any:

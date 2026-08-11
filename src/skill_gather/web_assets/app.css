@@ -68,8 +68,14 @@ button { cursor: pointer; }
 .nav-tab.active { border-bottom-color: var(--green); color: var(--green-dark); }
 .view-panel { margin-bottom: 18px; padding: 24px 28px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .view-panel .detail-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.view-panel > .runs-list { max-height: 520px; margin-top: 18px; overflow: auto; border: 1px solid var(--line); }
 .result-filters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .result-filters input, .result-filters select { width: 128px; }
+.result-read { width: 100%; margin: 8px 0; padding: 0; border: 0; color: var(--ink); background: transparent; text-align: left; font-weight: 700; }
+.result-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 18px; }
+.result-document { min-width: 0; padding: 16px; border: 1px solid var(--line); background: #fcfefc; }
+.result-document h2 { margin: 0 0 8px; font-size: 16px; }
+.result-document pre { max-height: 520px; margin: 14px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 Consolas, monospace; }
 .local-status { color: var(--muted); font-size: 13px; }
 .local-status i {
   display: inline-block;
@@ -263,7 +269,7 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
 }
 .status.completed, .status.passed { color: var(--green-dark); background: var(--green-soft); }
 .status.failed { color: var(--red); background: var(--red-soft); }
-.status.running, .status.created, .status.needs_review { color: var(--amber); background: var(--amber-soft); }
+.status.running, .status.created, .status.paused, .status.needs_review { color: var(--amber); background: var(--amber-soft); }
 
 .detail-panel { min-width: 0; padding: 26px 28px; }
 .empty-state { min-height: 520px; display: grid; place-content: center; justify-items: center; color: var(--muted); }
@@ -326,6 +332,16 @@ select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23, 107, 6
   .detail-panel { padding: 22px 18px; }
   .evidence-item { grid-template-columns: 72px minmax(0, 1fr) 42px; }
   .evidence-type { display: none; }
+  .result-filters {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+  .result-filters input, .result-filters select, .result-filters button {
+    width: 100%;
+    min-width: 0;
+  }
   .topic-actions { flex-wrap: wrap; }
   .topic-actions .muted { width: 100%; margin-left: 0; }
   .candidate-card { grid-template-columns: 24px minmax(0, 1fr) 52px; padding: 11px; }

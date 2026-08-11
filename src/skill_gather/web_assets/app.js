@@ -3,10 +3,10 @@ const stageNames = {
   manifest: "元数据", media_extract: "媒体", frame_extract: "抽帧", asr: "ASR",
   vision_ocr: "视觉", timeline_merge: "证据合并", distill: "蒸馏", score: "评分", package: "打包"
 };
-const statusNames = { created: "排队中", running: "处理中", completed: "已完成", failed: "失败", passed: "通过", needs_review: "待复核" };
+const statusNames = { created: "排队中", running: "处理中", paused: "已暂停", completed: "已完成", failed: "失败", passed: "通过", needs_review: "待复核" };
 const difficultyNames = { lenient: "宽松", standard: "标准", strict: "严格", off: "关闭 Judge" };
 const RUN_POLL_STATUSES = new Set(["created", "running"]);
-const TOPIC_POLL_STATUSES = new Set(["processing_sources", "generating", "scoring"]);
+const TOPIC_POLL_STATUSES = new Set(["awaiting_plan_confirmation", "processing_sources", "generating", "scoring"]);
 
 const state = { runs: [], selectedId: null, timer: null };
 const runPollState = { inFlight: false };
@@ -46,8 +46,8 @@ async function loadMetrics() {
     const [data, work] = await Promise.all([request("/api/metrics"), request("/api/work-items")]);
     const statuses = Object.entries(data.by_status || {}).map(([key, value]) => `<div class="metric"><div class="metric-label">${escapeHtml(key)}</div><div class="metric-value">${Number(value) || 0}</div></div>`).join("");
     grid.innerHTML = `<div class="metric"><div class="metric-label">任务总数</div><div class="metric-value">${Number(data.total) || 0}</div></div><div class="metric"><div class="metric-label">活动作业</div><div class="metric-value">${Number(data.active_jobs) || 0}</div></div><div class="metric"><div class="metric-label">模型可用性</div><div class="metric-value small">${escapeHtml(data.model_availability || "unknown")}</div></div>${statuses}`;
-    queue.innerHTML = (work.items || []).map(item => { const elapsed = item.usage?.elapsed_runtime_sec || 0; const maxRuntime = item.budget?.max_runtime_sec || 0; const action = item.kind === "topic" && !["completed", "failed", "paused"].includes(item.status) ? `<button class="button secondary" data-operation="pause" data-id="${escapeHtml(item.run_id)}">暂停</button>` : item.kind === "topic" && ["failed", "paused"].includes(item.status) ? `<button class="button secondary" data-operation="retry" data-id="${escapeHtml(item.run_id)}">重试</button>` : ""; return `<div class="run-item"><div class="run-top"><span class="run-meta">${escapeHtml(item.kind)} · ${escapeHtml(item.current_stage || item.status)}</span>${statusBadge(item.status)}</div><div class="run-title">${escapeHtml(item.topic || item.title || item.run_id)}</div><div class="run-meta">耗时 ${elapsed}s / ${maxRuntime || "-"}s${item.failure_reason ? ` · ${escapeHtml(item.failure_reason)}` : ""}</div>${action}</div>`; }).join("") || '<div class="loading">暂无任务。</div>';
-    queue.querySelectorAll("[data-operation]").forEach(button => button.addEventListener("click", async () => { await request(`/api/topics/${encodeURIComponent(button.dataset.id)}/${button.dataset.operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await loadMetrics(); }));
+    queue.innerHTML = (work.items || []).map(item => { const elapsed = item.usage?.elapsed_runtime_sec || 0; const maxRuntime = item.budget?.max_runtime_sec || 0; const canPause = !["completed", "failed", "paused"].includes(item.status); const canRetry = ["failed", "paused"].includes(item.status); const action = canPause ? `<button class="button secondary" data-operation="pause" data-kind="${escapeHtml(item.kind)}" data-id="${escapeHtml(item.run_id)}">暂停</button>` : canRetry ? `<button class="button secondary" data-operation="retry" data-kind="${escapeHtml(item.kind)}" data-id="${escapeHtml(item.run_id)}">重试</button>` : ""; return `<div class="run-item"><div class="run-top"><span class="run-meta">${escapeHtml(item.kind)} · ${escapeHtml(item.current_stage || item.status)}</span>${statusBadge(item.status)}</div><div class="run-title">${escapeHtml(item.topic || item.title || item.run_id)}</div><div class="run-meta">耗时 ${elapsed}s / ${maxRuntime || "-"}s${item.failure_reason ? ` · ${escapeHtml(item.failure_reason)}` : ""}</div>${action}</div>`; }).join("") || '<div class="loading">暂无任务。</div>';
+    queue.querySelectorAll("[data-operation]").forEach(button => button.addEventListener("click", async () => { const group = button.dataset.kind === "topic" ? "topics" : "runs"; await request(`/api/${group}/${encodeURIComponent(button.dataset.id)}/${button.dataset.operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await loadMetrics(); }));
   } catch (error) { grid.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
 }
 
@@ -59,17 +59,29 @@ async function loadResults() {
     const params = new URLSearchParams({ type: document.querySelector("#results-type")?.value || "all", status: document.querySelector("#results-status")?.value || "all", min_score: document.querySelector("#results-score")?.value || "0", risk: document.querySelector("#results-risk")?.value || "", source: document.querySelector("#results-source")?.value || "" });
     const data = await request(`/api/results?${params}`);
     visibleResults = data.results || [];
-    target.innerHTML = visibleResults.length ? visibleResults.map(item => `<label class="run-item"><div class="run-top"><span><input type="checkbox" data-result-id="${escapeHtml(item.run_id)}"> <span class="run-meta">${escapeHtml(item.kind)}</span></span>${statusBadge(item.result_status)}</div><div class="run-title">${escapeHtml(item.title || item.topic || item.run_id)}</div><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div><div class="run-meta">${escapeHtml(Object.values(item.artifacts || {}).filter(Boolean).join(" · "))}</div></label>`).join("") : '<div class="loading">暂无匹配结果。</div>';
+    target.innerHTML = visibleResults.length ? visibleResults.map(item => `<div class="run-item"><div class="run-top"><label><input type="checkbox" data-result-id="${escapeHtml(item.run_id)}"> <span class="run-meta">${escapeHtml(item.kind)}</span></label>${statusBadge(item.result_status)}</div><button class="result-read" type="button" data-read-id="${escapeHtml(item.run_id)}">${escapeHtml(item.title || item.topic || item.run_id)}</button><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div><div class="run-meta">${escapeHtml(Object.values(item.artifacts || {}).filter(Boolean).join(" · "))}</div></div>`).join("") : '<div class="loading">暂无匹配结果。</div>';
+    target.querySelectorAll("[data-read-id]").forEach(button => button.addEventListener("click", async () => renderResultDetails([await request(`/api/results/${encodeURIComponent(button.dataset.readId)}`)])));
   } catch (error) { target.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
 }
 
-document.querySelectorAll(".nav-tab").forEach(tab => tab.addEventListener("click", () => setView(tab.dataset.view)));
+window.addEventListener("workspace:view", event => setView(event.detail.view));
 document.querySelector("#metrics-refresh")?.addEventListener("click", loadMetrics);
 ["#results-type", "#results-status", "#results-score", "#results-risk", "#results-source"].forEach(selector => document.querySelector(selector)?.addEventListener("change", loadResults));
-document.querySelector("#results-export")?.addEventListener("click", () => {
+function selectedResultIds() { return [...document.querySelectorAll("[data-result-id]:checked")].map(item => item.dataset.resultId); }
+function renderResultDetails(items) {
+  const target = document.querySelector("#results-detail");
+  target.innerHTML = items.map(item => `<article class="result-document"><h2>${escapeHtml(item.title)}</h2><div class="run-meta">${escapeHtml(item.kind)} · ${escapeHtml(item.score?.final_status || "")}</div><pre>${escapeHtml(item.skill || item.knowledge || JSON.stringify(item.evidence || item.fusion || {}, null, 2))}</pre></article>`).join("");
+}
+document.querySelector("#results-compare")?.addEventListener("click", async () => {
+  const ids = selectedResultIds().slice(0, 3);
+  if (ids.length < 2) return showToast("至少选择两个结果进行比较");
+  renderResultDetails(await Promise.all(ids.map(id => request(`/api/results/${encodeURIComponent(id)}`))));
+});
+document.querySelector("#results-export")?.addEventListener("click", async () => {
   const selected = new Set([...document.querySelectorAll("[data-result-id]:checked")].map(item => item.dataset.resultId));
-  const payload = visibleResults.filter(item => selected.has(item.run_id));
-  if (!payload.length) return showToast("请先选择要导出的结果");
+  const summaries = visibleResults.filter(item => selected.has(item.run_id));
+  if (!summaries.length) return showToast("请先选择要导出的结果");
+  const payload = await Promise.all(summaries.map(item => request(`/api/results/${encodeURIComponent(item.run_id)}`)));
   const link = document.createElement("a");
   link.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
   link.download = "skill-seargen-results.json";
@@ -164,6 +176,7 @@ function renderTopic(topic) {
   const fusionGaps = fusion.evidence_gaps || [];
   const budget = topic.budget || {};
   const plan = topic.plan || null;
+  const planJob = topic.plan_job || {};
   const cache = topic.cache || {};
   const budgetSummary = `<span class="muted">预算：候选 ${Number(budget.max_candidates) || 0} · 处理来源 ${Number(budget.max_selected_sources) || 0} · 最长 ${Number(budget.max_runtime_sec) || 0} 秒 · 缓存 ${cache.reuse_cache ? "复用" : "关闭"}</span>`;
   const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
@@ -194,7 +207,7 @@ function renderTopic(topic) {
       ${videoRunSummary}
     </section>` : "";
   const defaultPlanOption = plan?.options?.find(option => option.option_id === plan.recommended_option_id) || plan?.options?.[0];
-  const planPanel = topic.status === "awaiting_plan_confirmation" && plan ? `<section class="topic-confirmation"><div><strong>确认研究语义</strong><span>${escapeHtml((plan.ambiguity_reasons || []).join("；"))}</span></div><div class="candidate-list">${(plan.options || []).map(option => `<label class="candidate-card"><input type="radio" name="plan-option" value="${escapeHtml(option.option_id)}" ${option.option_id === plan.recommended_option_id ? "checked" : ""}><span><span class="candidate-title">${escapeHtml(option.label)}</span><span class="candidate-summary">${escapeHtml(option.goal)}</span><span class="candidate-meta">${escapeHtml((option.facets || []).join(" · "))}</span></span></label>`).join("")}</div><div class="plan-editor"><label>目标<input id="plan-goal" value="${escapeHtml(defaultPlanOption?.goal || "")}"></label><label>排除范围<input id="plan-exclusions" value="${escapeHtml((defaultPlanOption?.exclusions || []).join("；"))}"></label><label>研究维度<input id="plan-facets" value="${escapeHtml((defaultPlanOption?.facets || []).join("；"))}"></label><label>查询词<input id="plan-queries" value="${escapeHtml((defaultPlanOption?.queries || []).join("；"))}"></label><button id="plan-confirm" class="button primary" type="button">确认计划</button></div></section>` : "";
+  const planPanel = topic.status === "awaiting_plan_confirmation" && plan ? `<section class="topic-confirmation"><div><strong>确认研究语义</strong><span>${escapeHtml((plan.ambiguity_reasons || []).join("；"))}${planJob.active ? " · LLM 规划中" : ""}</span>${planJob.active ? '<button id="plan-interrupt" class="button secondary" type="button">中断 LLM 规划</button>' : ""}</div><div class="candidate-list">${(plan.options || []).map(option => `<label class="candidate-card"><input type="radio" name="plan-option" value="${escapeHtml(option.option_id)}" ${option.option_id === plan.recommended_option_id ? "checked" : ""}><span><span class="candidate-title">${escapeHtml(option.label)}</span><span class="candidate-summary">${escapeHtml(option.goal)}</span><span class="candidate-meta">${escapeHtml((option.facets || []).join(" · "))}</span></span></label>`).join("")}</div><div class="plan-editor"><label>目标<input id="plan-goal" value="${escapeHtml(defaultPlanOption?.goal || "")}"></label><label>排除范围<input id="plan-exclusions" value="${escapeHtml((defaultPlanOption?.exclusions || []).join("；"))}"></label><label>研究维度<input id="plan-facets" value="${escapeHtml((defaultPlanOption?.facets || []).join("；"))}"></label><label>查询词<input id="plan-queries" value="${escapeHtml((defaultPlanOption?.queries || []).join("；"))}"></label><button id="plan-confirm" class="button primary" type="button">确认计划</button></div></section>` : "";
   topicDetail.innerHTML = `
     <div class="topic-actions">${searchButton}${autoButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)} · ${escapeHtml(topic.execution_mode || "manual")}</span>${budgetSummary}</div>
     ${planPanel}
@@ -222,6 +235,10 @@ function renderTopic(topic) {
       await loadTopics();
       await selectTopic(topic.run_id);
     } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; }
+  });
+  document.querySelector("#plan-interrupt")?.addEventListener("click", async () => {
+    await request(`/api/topics/${encodeURIComponent(topic.run_id)}/plan/interrupt`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    await selectTopic(topic.run_id);
   });
   const autoButtonNode = document.querySelector("#topic-auto-button");
   if (autoButtonNode) autoButtonNode.addEventListener("click", async () => {

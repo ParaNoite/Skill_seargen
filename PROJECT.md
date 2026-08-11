@@ -43,6 +43,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 | 模块 | 路径 | 职责 |
 |---|---|---|
 | CLI | `src/skill_gather/cli.py` | 命令入口、参数解析、面向用户的错误语义 |
+| Web 工作台 | `src/skill_gather/web.py`、`frontend/`、`src/skill_gather/web_assets/` | 本地 JSON API、React 视图导航、静态工作台与构建产物 |
 | 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、评分结果 |
 | 主题任务 | `src/skill_gather/topics.py` | 主题 run 的持久化、状态推进、预算用量、失败审计与恢复 |
 | 语义计划 | `src/skill_gather/planning.py` | 模糊主题判定、结构化语义方案、规则降级与确认 |

@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 
 PackageStatus = Literal["passed", "needs_review", "failed"]
-RunStatus = Literal["created", "running", "completed", "failed"]
+RunStatus = Literal["created", "running", "completed", "paused", "failed"]
 TopicMode = Literal["normal", "technical"]
 TopicStatus = Literal[
     "created",

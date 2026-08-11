@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 
-from skill_gather.automation import choose_auto_sources, evaluate_release_gate
+from skill_gather.automation import choose_auto_sources, evaluate_release_gate, persist_video_release_gate
+from skill_gather.runs import read_json
 from skill_gather.models import TopicSourceCandidate
 from skill_gather.topics import TopicRunStore
 
 
 class AutomationTests(unittest.TestCase):
+    def test_single_video_release_gate_downgrades_passed_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            decision = persist_video_release_gate(Path(directory), {"final_score": 90, "final_status": "passed"})
+            self.assertEqual(decision.status, "needs_review")
+            self.assertEqual(read_json(Path(directory) / "score.json")["final_status"], "needs_review")
+
     def test_auto_selection_prefers_diverse_high_quality_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             task = TopicRunStore(directory).start_or_resume("Godot NavigationAgent3D", mode="technical", execution_mode="auto")

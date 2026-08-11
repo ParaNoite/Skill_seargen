@@ -15,13 +15,13 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .cli import handle_topic_process, handle_video
-from .automation import choose_auto_sources
+from .automation import choose_auto_sources, persist_video_release_gate
 from .config import load_config
 from .integrations.newapi import NewApiClient, resolve_api_key
 from .models import PIPELINE_STAGES
 from .planning import assess_ambiguity, build_semantic_plan
 from .mvp_check import run_mvp_check
-from .runs import RunStore, read_json, safe_slug, write_json
+from .runs import RunStore, read_json, safe_slug
 from .search import search_topic as execute_topic_search
 from .source import infer_source
 from .scoring import normalize_judge_difficulty
@@ -37,6 +37,10 @@ class WebApp:
         self.topic_store = TopicRunStore(runs)
         self._jobs: dict[str, dict[str, Any]] = {}
         self._topic_jobs: dict[str, dict[str, Any]] = {}
+        self._job_cancellations: dict[str, threading.Event] = {}
+        self._topic_cancellations: dict[str, threading.Event] = {}
+        self._plan_cancellations: dict[str, threading.Event] = {}
+        self._plan_jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def list_runs(self) -> list[dict[str, Any]]:
@@ -83,8 +87,11 @@ class WebApp:
         payload["fusion"] = self._optional_json(self.topic_store.run_path(run_id) / fusion_path) if fusion_path else {}
         with self._lock:
             job = self._topic_jobs.get(run_id)
+            plan_job = self._plan_jobs.get(run_id)
         if job:
             payload["job"] = dict(job)
+        if plan_job:
+            payload["plan_job"] = dict(plan_job)
         return payload
 
     def create_topic(self, topic: str, *, mode: str = "normal", execution_mode: str = "manual", config_path: str | None = None) -> dict[str, Any]:
@@ -102,9 +109,20 @@ class WebApp:
         )
         assessment = assess_ambiguity(topic, mode)
         if assessment.ambiguous and task.plan is None:
-            plan = build_semantic_plan(task, NewApiClient.from_config(config.newapi), config.newapi.distiller_model)
-            task = self.topic_store.create_plan(task.run_id, plan=plan)
-            if execution_mode == "auto" and task.plan:
+            task = self.topic_store.create_plan(task.run_id)
+            client = NewApiClient.from_config(config.newapi)
+            if client is not None:
+                event = threading.Event()
+                with self._lock:
+                    self._plan_cancellations[task.run_id] = event
+                    self._plan_jobs[task.run_id] = {"active": True, "status": "running"}
+                threading.Thread(
+                    target=self._enrich_plan,
+                    args=(task.run_id, client, config.newapi.distiller_model, event),
+                    name=f"skill-gather-plan-{task.run_id}",
+                    daemon=True,
+                ).start()
+            elif execution_mode == "auto" and task.plan:
                 task = self.topic_store.confirm_plan(task.run_id, task.plan.recommended_option_id)
         elif not assessment.ambiguous:
             task.plan_audit.append({"event": "plan_skipped", "reason": "deterministic_topic"})
@@ -132,24 +150,91 @@ class WebApp:
 
     def get_plan(self, run_id: str) -> dict[str, Any]:
         task = self.topic_store.load(run_id)
-        return {"run_id": run_id, "plan": task.plan.to_dict() if task.plan else None, "audit": task.plan_audit}
+        with self._lock:
+            job = dict(self._plan_jobs.get(run_id, {}))
+        return {"run_id": run_id, "plan": task.plan.to_dict() if task.plan else None, "audit": task.plan_audit, "job": job}
 
     def confirm_plan(self, run_id: str, option_id: str, edited: dict[str, object] | None = None) -> dict[str, Any]:
+        with self._lock:
+            event = self._plan_cancellations.get(run_id)
+            if event:
+                event.set()
+            if run_id in self._plan_jobs:
+                self._plan_jobs[run_id] = {"active": False, "status": "confirmed"}
         return self.topic_store.confirm_plan(run_id, option_id, edited=edited).to_dict()
 
     def interrupt_plan(self, run_id: str) -> dict[str, Any]:
+        with self._lock:
+            event = self._plan_cancellations.get(run_id)
+            if event:
+                event.set()
+            if run_id in self._plan_jobs:
+                self._plan_jobs[run_id] = {"active": False, "status": "interrupted"}
         return self.topic_store.interrupt_plan(run_id).to_dict()
 
+    def _enrich_plan(self, run_id: str, client: NewApiClient, model: str, event: threading.Event) -> None:
+        task = self.topic_store.load(run_id)
+        plan = build_semantic_plan(task, client, model)
+        if event.is_set():
+            return
+        task = self.topic_store.load(run_id)
+        if task.plan and task.plan.warning == "plan_interrupted":
+            return
+        task.plan = plan
+        task.plan_audit.append({"event": "plan_enriched", "method": plan.generation_method})
+        self.topic_store.save(task)
+        if task.execution_mode == "auto" and task.status == "awaiting_plan_confirmation":
+            self.topic_store.confirm_plan(run_id, plan.recommended_option_id)
+        with self._lock:
+            self._plan_jobs[run_id] = {"active": False, "status": "finished"}
+
     def pause_topic(self, run_id: str) -> dict[str, Any]:
+        with self._lock:
+            event = self._topic_cancellations.get(run_id)
+            if event:
+                event.set()
         return self.topic_store.pause(run_id).to_dict()
 
     def retry_topic(self, run_id: str) -> dict[str, Any]:
         task = self.topic_store.load(run_id)
         if task.status == "paused":
-            return self.topic_store.resume_paused(run_id).to_dict()
-        if task.status == "failed":
-            return self.topic_store.resume(run_id).to_dict()
-        raise ValueError("只有暂停或失败的主题任务可以重试")
+            task = self.topic_store.resume_paused(run_id)
+        elif task.status == "failed":
+            task = self.topic_store.resume(run_id)
+        else:
+            raise ValueError("只有暂停或失败的主题任务可以重试")
+        if task.execution_mode == "auto":
+            if task.status == "processing_sources":
+                return self.process_topic(run_id)
+            if task.status in {"created", "awaiting_selection"}:
+                return self.start_auto_topic(run_id)
+        return task.to_dict()
+
+    def pause_video(self, run_id: str) -> dict[str, Any]:
+        state = self.store.load(run_id)
+        if state.status not in {"created", "running"}:
+            raise ValueError("只有排队或运行中的视频任务可以暂停")
+        with self._lock:
+            event = self._job_cancellations.get(run_id)
+            if event:
+                event.set()
+            job = self._jobs.setdefault(run_id, {})
+            job.update({"active": False, "status": "paused", "error": ""})
+        state.status = "paused"
+        self.store.save(state)
+        return state.to_dict()
+
+    def retry_video(self, run_id: str) -> dict[str, Any]:
+        state = self.store.load(run_id)
+        if state.status not in {"paused", "failed"}:
+            raise ValueError("只有暂停或失败的视频任务可以重试")
+        manifest = self._optional_json(self.store.manifest_path(run_id))
+        url = str(manifest.get("url", ""))
+        if not url:
+            raise ValueError("视频任务缺少可重试的来源 URL")
+        state.status = "created"
+        self.store.save(state)
+        return self.start_video(url, judge_difficulty=state.judge_difficulty, execution_mode=state.execution_mode)
 
     def list_work_items(self) -> list[dict[str, Any]]:
         return [{**item, "kind": "video"} for item in self.list_runs()] + [{**item, "kind": "topic"} for item in self.list_topics()]
@@ -192,6 +277,8 @@ class WebApp:
             for item in self.list_topics():
                 if item.get("status") not in {"completed", "failed"}:
                     continue
+                if result_type == "skill" and item.get("mode") != "technical":
+                    continue
                 detail = self.get_topic(item["run_id"])
                 score_payload: dict[str, Any] = {}
                 score_path = detail.get("artifacts", {}).get("score")
@@ -205,6 +292,33 @@ class WebApp:
                     continue
                 results.append({**item, "kind": "topic", "score": score, "result_status": result_status, "risk_flags": risks, "artifacts": detail.get("artifacts", {})})
         return results
+
+    def get_result(self, run_id: str) -> dict[str, Any]:
+        if self.topic_store.state_path(run_id).exists():
+            detail = self.get_topic(run_id)
+            run_root = self.topic_store.run_path(run_id)
+            artifacts = detail.get("artifacts", {})
+            return {
+                "run_id": run_id,
+                "kind": "topic",
+                "title": detail.get("topic", run_id),
+                "knowledge": self._artifact_text(run_root, artifacts.get("knowledge")),
+                "skill": self._artifact_text(run_root, artifacts.get("skill")),
+                "score": self._optional_json(run_root / artifacts["score"]) if artifacts.get("score") else {},
+                "fusion": detail.get("fusion", {}),
+                "risk_flags": detail.get("fusion", {}).get("risk_flags", []),
+            }
+        detail = self.get_run(run_id)
+        return {
+            "run_id": run_id,
+            "kind": "video",
+            "title": detail.get("title", run_id),
+            "knowledge": "",
+            "skill": "",
+            "score": detail.get("score", {}),
+            "evidence": detail.get("evidence", []),
+            "risk_flags": detail.get("risk_flags", []),
+        }
 
     def search_topic(self, run_id: str, *, use_fake: bool = False, config_path: str | None = None) -> dict[str, Any]:
         config = load_config(config_path or self.config_path)
@@ -256,6 +370,7 @@ class WebApp:
             if current and current.get("active"):
                 raise RuntimeError("这个主题正在处理中")
             self._topic_jobs[run_id] = {"active": True, "status": "queued", "error": ""}
+            self._topic_cancellations[run_id] = threading.Event()
 
         thread = threading.Thread(
             target=self._run_topic,
@@ -278,13 +393,19 @@ class WebApp:
             config=config_path,
             vision_mode=vision_mode,
             vision_frame_limit=vision_frame_limit,
+            cancel_event=self._topic_cancellations.get(run_id),
         )
         try:
-            exit_code = handle_topic_process(args, stdout, stderr)
+            if args.cancel_event and args.cancel_event.is_set():
+                exit_code = 0
+                payload = {"run_id": run_id, "status": "paused"}
+            else:
+                exit_code = handle_topic_process(args, stdout, stderr)
+                payload = {}
             error = stderr.getvalue().strip()
-            payload: dict[str, Any] = {}
             try:
-                payload = json.loads(stdout.getvalue())
+                if stdout.getvalue():
+                    payload = json.loads(stdout.getvalue())
             except json.JSONDecodeError:
                 pass
             if exit_code != 0 and not error:
@@ -296,7 +417,7 @@ class WebApp:
         with self._lock:
             self._topic_jobs[run_id] = {
                 "active": False,
-                "status": "failed" if exit_code != 0 else "finished",
+                "status": "paused" if payload.get("status") == "paused" else ("failed" if exit_code != 0 else "finished"),
                 "error": error,
                 "result": payload,
             }
@@ -354,6 +475,7 @@ class WebApp:
             if current and current.get("active"):
                 raise RuntimeError("这个视频正在处理中")
             self._jobs[state.run_id] = {"active": True, "status": "queued", "error": ""}
+            self._job_cancellations[state.run_id] = threading.Event()
 
         thread = threading.Thread(
             target=self._run_video,
@@ -429,16 +551,19 @@ class WebApp:
             judge_difficulty=judge_difficulty,
         )
         try:
+            event = self._job_cancellations.get(run_id)
+            if event and event.is_set():
+                return
             exit_code = handle_video(args, stdout, stderr)
             error = stderr.getvalue().strip()
+            if event and event.is_set():
+                state = self.store.load(run_id)
+                state.status = "paused"
+                self.store.save(state)
+                return
             if exit_code == 0 and execution_mode == "auto":
-                score_path = self.store.run_path(run_id) / "score.json"
-                score = self._optional_json(score_path)
-                if score.get("final_status") == "passed":
-                    score["final_status"] = "needs_review"
-                    score["release_gate_reasons"] = ["单视频缺少交叉证据"]
-                    write_json(score_path, score)
-                write_json(self.store.run_path(run_id) / "release_gate.json", {"status": "needs_review", "reasons": ["单视频缺少交叉证据"]})
+                run_root = self.store.run_path(run_id)
+                persist_video_release_gate(run_root, self._optional_json(run_root / "score.json"))
             if exit_code != 0 and not error:
                 error = "处理未成功完成"
         except Exception as exc:  # Preserve the error for the local status UI.
@@ -490,6 +615,23 @@ class WebApp:
         except (OSError, json.JSONDecodeError):
             return {}
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _artifact_text(run_root: Path, relative_path: Any) -> str:
+        if not relative_path:
+            return ""
+        root = run_root.resolve()
+        target = (run_root / str(relative_path)).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return ""
+        if not target.is_file() or target.stat().st_size > 2 * 1024 * 1024:
+            return ""
+        try:
+            return target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
 
 
 def create_server(
@@ -543,6 +685,13 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     source=query.get("source", [""])[0],
                 )})
                 return
+            if path.startswith("/api/results/"):
+                run_id = unquote(path.removeprefix("/api/results/"))
+                try:
+                    self._send_json(app.get_result(run_id))
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                return
             if path == "/api/runs":
                 self._send_json({"runs": app.list_runs()})
                 return
@@ -583,6 +732,9 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             if path == "/app.js":
                 self._send_asset("app.js", "text/javascript; charset=utf-8")
                 return
+            if path == "/react-nav.js":
+                self._send_asset("react-nav.js", "text/javascript; charset=utf-8")
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_DELETE(self) -> None:
@@ -614,6 +766,14 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     )
                     self._send_json(result, HTTPStatus.ACCEPTED)
                     return
+                if path.startswith("/api/runs/"):
+                    suffix = path.removeprefix("/api/runs/")
+                    if suffix.endswith("/pause"):
+                        self._send_json(app.pause_video(suffix.removesuffix("/pause").strip("/")))
+                        return
+                    if suffix.endswith("/retry"):
+                        self._send_json(app.retry_video(suffix.removesuffix("/retry").strip("/")), HTTPStatus.ACCEPTED)
+                        return
                 if path == "/api/topics":
                     result = app.create_topic(
                         str(body.get("topic", "")),
