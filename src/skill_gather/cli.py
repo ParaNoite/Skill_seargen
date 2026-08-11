@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .adapters.bilibili import build_initial_manifest
+from .acceptance import run_offline_acceptance
 from .config import ConfigError, load_config
 from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
 from .github_processing import process_github_sources
@@ -25,7 +26,10 @@ from .reports import build_reliability_report, build_vision_report
 from .runs import RunStore, read_json, write_json
 from .search import SearchProviderError, search_topic
 from .source import SourceInferenceError, infer_source
-from .topic_processing import process_web_sources, write_knowledge_markdown
+from .topic_processing import process_web_sources
+from .distillers.technical_skill import apply_topic_human_review, generate_technical_skill, rescore_technical_package
+from .integrations.newapi import NewApiClient
+from .pipeline.topic_fusion import fuse_topic_evidence, write_fusion_artifacts
 from .topic_videos import process_topic_videos
 from .topics import TopicRunStore
 
@@ -98,6 +102,19 @@ def build_parser() -> argparse.ArgumentParser:
     topic_resume.add_argument("--runs", default="./runs", help="主题 run 状态目录")
     topic_resume.set_defaults(handler=handle_topic_resume)
 
+    topic_rerun = topic_commands.add_parser("rerun", help="从指定阶段重跑主题任务")
+    topic_rerun.add_argument("run_id")
+    topic_rerun.add_argument("--runs", default="./runs")
+    topic_rerun.add_argument("--stage", choices=["processing_sources", "generating", "scoring"], required=True)
+    topic_rerun.set_defaults(handler=handle_topic_rerun)
+
+    topic_review = topic_commands.add_parser("review", help="记录技术主题 skill 的人工复核")
+    topic_review.add_argument("run_id")
+    topic_review.add_argument("--runs", default="./runs")
+    topic_review.add_argument("--label", choices=["usable", "needs_changes", "unusable"], required=True)
+    topic_review.add_argument("--notes", default="")
+    topic_review.set_defaults(handler=handle_topic_review)
+
     topic_search = topic_commands.add_parser("search", help="搜索主题候选来源")
     topic_search.add_argument("run_id")
     topic_search.add_argument("--runs", default="./runs", help="主题 run 状态目录")
@@ -168,6 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mvp_check.set_defaults(handler=handle_mvp_check)
 
+    acceptance = subcommands.add_parser("acceptance", help="运行 v1.0 固定 10 主题离线回归")
+    acceptance.add_argument("--dataset", default="benchmarks/v1.0-topics.json")
+    acceptance.add_argument("--config", default="configs/skill-gather.example.json")
+    acceptance.add_argument("--runs", default="./runs/v1.0-offline-acceptance")
+    acceptance.set_defaults(handler=handle_acceptance)
+
+    model_check = subcommands.add_parser("model-check", help="探测配置模型的真实文本和视觉调用能力")
+    model_check.add_argument("--config", default="config.json", help="配置文件路径")
+    model_check.set_defaults(handler=handle_model_check)
+
     web = subcommands.add_parser("web", help="启动本地 Web 界面")
     web.add_argument("--config", default="config.json", help="配置文件路径")
     web.add_argument("--out", default="./skills", help="候选 skill 输出目录")
@@ -184,13 +211,7 @@ def handle_web(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
     try:
         load_config(args.config)
-        server = create_server(
-            host=args.host,
-            port=args.port,
-            config=args.config,
-            runs=args.runs,
-            out=args.out,
-        )
+        server = _create_web_server(create_server, args)
     except (ConfigError, FileNotFoundError, json.JSONDecodeError, OSError) as exc:
         print(str(exc), file=stderr)
         return 2
@@ -205,6 +226,48 @@ def handle_web(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return 0
 
 
+def _create_web_server(create_server: Any, args: argparse.Namespace) -> Any:
+    kwargs = {"host": args.host, "config": args.config, "runs": args.runs, "out": args.out}
+    try:
+        return create_server(port=args.port, **kwargs)
+    except OSError as exc:
+        if args.port == 0 or getattr(exc, "winerror", None) not in {10013, 10048}:
+            raise
+        return create_server(port=0, **kwargs)
+
+
+def handle_acceptance(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        report = run_offline_acceptance(
+            args.dataset,
+            config_path=args.config,
+            runs_path=args.runs,
+        )
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError, ValueError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json(report, stdout)
+    return 0 if report["status"] == "passed" else 1
+
+
+def handle_model_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        config = load_config(args.config)
+        client = NewApiClient.from_config(config.newapi)
+        if client is None:
+            raise ValueError("未找到 NewAPI API Key，无法执行真实模型探测")
+        probes = [
+            client.probe_model(config.newapi.vision_model, "vision"),
+            client.probe_model(config.newapi.distiller_model, "text"),
+            client.probe_model(config.newapi.judge_model, "text"),
+        ]
+    except (ConfigError, FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json({"probes": probes}, stdout)
+    return 0 if all(bool(probe["available"]) for probe in probes) else 1
+
+
 def handle_mvp_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     try:
         config = load_config(args.config)
@@ -213,7 +276,7 @@ def handle_mvp_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
         return 2
 
     payload = run_mvp_check(config)
-    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(payload, stdout)
     return 0 if payload.get("status") == "passed" else 1
 
 
@@ -279,7 +342,7 @@ def handle_video(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     )
     state.artifacts["cli_result"] = str(cli_result_path)
     store.save(state)
-    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(payload, stdout)
     return exit_code
 
 
@@ -320,7 +383,7 @@ def handle_topic_create(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
         print(str(exc), file=stderr)
         return 2
 
-    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    _print_json(task.to_dict(), stdout)
     return 0
 
 
@@ -331,7 +394,7 @@ def handle_topic_inspect(args: argparse.Namespace, stdout: TextIO, stderr: TextI
         print(str(exc), file=stderr)
         return 1
 
-    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    _print_json(task.to_dict(), stdout)
     return 0
 
 
@@ -342,7 +405,35 @@ def handle_topic_resume(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
         print(str(exc), file=stderr)
         return 1
 
-    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    _print_json(task.to_dict(), stdout)
+    return 0
+
+
+def handle_topic_rerun(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        task = TopicRunStore(args.runs).rerun(args.run_id, args.stage)
+    except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json(task.to_dict(), stdout)
+    return 0
+
+
+def handle_topic_review(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    store = TopicRunStore(args.runs)
+    try:
+        task = store.load(args.run_id)
+        package = task.package
+        if package is None:
+            raise ValueError("主题任务缺少主题包索引")
+        score_path = store.run_path(args.run_id) / (package.score or f"{package.root}/score.json")
+        score = apply_topic_human_review(score_path, label=args.label, notes=args.notes.strip())
+        task.artifacts["score"] = score_path.relative_to(store.run_path(args.run_id)).as_posix()
+        store.save(task)
+    except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json({"run_id": args.run_id, "score": score, "path": str(score_path)}, stdout)
     return 0
 
 
@@ -381,7 +472,7 @@ def handle_topic_search(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
             pass
         print(str(exc), file=stderr)
         return 2
-    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    _print_json(task.to_dict(), stdout)
     return 0 if task.status == "awaiting_selection" else 1
 
 
@@ -398,7 +489,7 @@ def handle_topic_candidates(args: argparse.Namespace, stdout: TextIO, stderr: Te
         "candidates": [candidate.to_dict() for candidate in task.candidates],
         "selected_sources": [candidate.to_dict() for candidate in task.selected_sources],
     }
-    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(payload, stdout)
     return 0
 
 
@@ -408,19 +499,26 @@ def handle_topic_select(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
     except (FileNotFoundError, ValueError) as exc:
         print(str(exc), file=stderr)
         return 2
-    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2), file=stdout)
+    _print_json(task.to_dict(), stdout)
     return 0
 
 
 def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     store = TopicRunStore(args.runs)
+    task = None
     try:
         if args.timeout_sec <= 0 or args.vision_frame_limit <= 0:
             raise ValueError("网页抓取超时和视觉帧数上限必须是正整数")
         task = store.load(args.run_id)
-        if task.status != "processing_sources":
-            raise ValueError("只有已确认来源、处于 processing_sources 的主题任务可以处理")
+        if task.status not in {"processing_sources", "generating", "scoring"}:
+            raise ValueError("主题任务必须处于 processing_sources、generating 或 scoring 阶段")
         run_root = store.run_path(args.run_id)
+        if task.status in {"generating", "scoring"}:
+            fusion_path = run_root / (task.package.fusion if task.package and task.package.fusion else "topic_package/fusion.json")
+            fusion = read_json(fusion_path)
+            task = _complete_topic_generation(store, task, run_root, fusion)
+            _print_json({"run_id": task.run_id, "status": task.status, "skill": task.artifacts.get("skill"), "score": task.artifacts.get("score")}, stdout)
+            return 0
         web_result = process_web_sources(task, run_root, timeout_sec=args.timeout_sec)
         selected_videos = [candidate for candidate in task.selected_sources if candidate.source_type == "video"]
         selected_github = [
@@ -438,9 +536,9 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
                 vision_mode=args.vision_mode,
                 vision_frame_limit=args.vision_frame_limit,
             )
-            successful_video_ids = {entry.candidate_id for entry in video_result.successful}
+            processed_video_ids = {candidate.candidate_id for candidate in selected_videos}
             web_result.skipped = [
-                item for item in web_result.skipped if item.get("candidate_id") not in successful_video_ids
+                item for item in web_result.skipped if item.get("candidate_id") not in processed_video_ids
             ]
         if selected_github:
             github_token_env = "GITHUB_TOKEN"
@@ -453,9 +551,9 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
                 timeout_sec=args.timeout_sec,
                 token_env=github_token_env,
             )
-            successful_github_ids = {str(record["candidate_id"]) for record in github_result.evidence}
+            processed_github_ids = {candidate.candidate_id for candidate in selected_github}
             web_result.skipped = [
-                item for item in web_result.skipped if item.get("candidate_id") not in successful_github_ids
+                item for item in web_result.skipped if item.get("candidate_id") not in processed_github_ids
             ]
         _save_processed_topic_sources(store, task)
         task.artifacts["web_processing_audit"] = "web_processing_audit.json"
@@ -479,6 +577,11 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
                     for item in (web_result.failures + (github_result.failures if github_result is not None else []))
                     if item.get("reason")
                 ]
+                + [
+                    str(entry.failure_reason)
+                    for entry in (video_result.failed if video_result is not None else [])
+                    if entry.failure_reason
+                ]
             )
             reason = "没有成功提取可用的网页正文、视频证据或 GitHub 证据；请检查处理审计文件"
             if failure_details:
@@ -486,14 +589,21 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
             task = store.fail(args.run_id, reason)
         else:
             store.advance(args.run_id, "generating")
-            if web_result.evidence:
-                knowledge_path = write_knowledge_markdown(task, run_root, web_result)
-                task = store.load(args.run_id)
-                task.artifacts["knowledge"] = str(knowledge_path.relative_to(run_root))
-                store.save(task)
-            store.advance(args.run_id, "scoring")
-            task = store.advance(args.run_id, "completed")
+            fusion = fuse_topic_evidence(task, run_root)
+            fusion_path, knowledge_path = write_fusion_artifacts(task, run_root, fusion)
+            task = store.load(args.run_id)
+            task.package.knowledge = knowledge_path.relative_to(run_root).as_posix() if task.package else None
+            task.package.fusion = fusion_path.relative_to(run_root).as_posix() if task.package else None
+            task.artifacts["knowledge"] = knowledge_path.relative_to(run_root).as_posix()
+            task.artifacts["fusion"] = fusion_path.relative_to(run_root).as_posix()
+            store.save(task)
+            task = _complete_topic_generation(store, task, run_root, fusion)
     except (ConfigError, FileNotFoundError, json.JSONDecodeError, ValueError, OSError) as exc:
+        if task is not None and task.status not in {"completed", "failed"}:
+            try:
+                task = store.fail(args.run_id, str(exc))
+            except (FileNotFoundError, ValueError):
+                pass
         print(str(exc), file=stderr)
         return 2
 
@@ -517,11 +627,34 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
             if task.package and task.package.knowledge and (run_root / task.package.knowledge).exists()
             else None
         ),
+        "fusion": task.artifacts.get("fusion"),
+        "skill": task.artifacts.get("skill"),
+        "score": task.artifacts.get("score"),
     }
     if task.failure_reason:
         payload["failure_reason"] = task.failure_reason
-    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(payload, stdout)
     return 0 if task.status == "completed" else 1
+
+
+def _complete_topic_generation(store: TopicRunStore, task: Any, run_root: Path, fusion: dict[str, Any]) -> Any:
+    if task.mode == "technical":
+        if task.package is None:
+            raise ValueError("主题任务缺少主题包索引")
+        if task.status == "generating":
+            skill_path, score_path, _score = generate_technical_skill(task, run_root, fusion)
+            task = store.load(task.run_id)
+            if task.package is None:
+                raise ValueError("主题任务缺少主题包索引")
+            task.package.skill = skill_path.relative_to(run_root).as_posix()
+        else:
+            score_path, _score = rescore_technical_package(task, run_root, fusion)
+        task.package.score = score_path.relative_to(run_root).as_posix()
+        task.artifacts.update({"skill": task.package.skill or "", "score": task.package.score})
+        store.save(task)
+    if task.status == "generating":
+        task = store.advance(task.run_id, "scoring")
+    return store.advance(task.run_id, "completed")
 
 
 def _save_processed_topic_sources(store: TopicRunStore, task: Any) -> None:
@@ -560,7 +693,7 @@ def handle_score(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             "final_status": "failed",
             "reason": "缺少 metadata.json，无法评分。",
         }
-        print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+        _print_json(payload, stdout)
         return 1
 
     try:
@@ -575,7 +708,7 @@ def handle_score(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         "scores": metadata.scores.to_dict(),
         "risk_flags": metadata.risk_flags,
     }
-    print(json.dumps(payload, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(payload, stdout)
     return 0
 
 
@@ -640,7 +773,7 @@ def handle_review(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> i
     }
     path = store.run_path(args.run_id) / "human_review.json"
     write_json(path, payload)
-    print(json.dumps({**payload, "path": str(path)}, ensure_ascii=False, indent=2), file=stdout)
+    _print_json({**payload, "path": str(path)}, stdout)
     return 0
 
 
@@ -653,7 +786,7 @@ def handle_calibrate(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(str(exc), file=stderr)
         return 2
-    print(json.dumps(report, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(report, stdout)
     return 0
 
 
@@ -666,7 +799,7 @@ def handle_benchmark_report(args: argparse.Namespace, stdout: TextIO, stderr: Te
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(str(exc), file=stderr)
         return 2
-    print(json.dumps(report, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(report, stdout)
     return 0
 
 
@@ -682,7 +815,7 @@ def handle_vision_report(args: argparse.Namespace, stdout: TextIO, stderr: TextI
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(str(exc), file=stderr)
         return 2
-    print(json.dumps(report, ensure_ascii=False, indent=2), file=stdout)
+    _print_json(report, stdout)
     return 0
 
 
@@ -813,6 +946,17 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
         return {}
     value = read_json(path)
     return value if isinstance(value, dict) else {}
+
+
+def _print_json(value: Any, stdout: TextIO) -> None:
+    text = json.dumps(value, ensure_ascii=False, indent=2)
+    encoding = getattr(stdout, "encoding", None)
+    if encoding:
+        try:
+            text.encode(encoding)
+        except (LookupError, UnicodeEncodeError):
+            text = json.dumps(value, ensure_ascii=True, indent=2)
+    print(text, file=stdout)
 
 
 def _unique(values: list[str]) -> list[str]:

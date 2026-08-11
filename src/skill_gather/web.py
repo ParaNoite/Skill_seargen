@@ -77,6 +77,8 @@ class WebApp:
         if not run_id or safe_slug(run_id) != run_id:
             raise FileNotFoundError("无效的主题 run id")
         payload = self.topic_store.load(run_id).to_dict()
+        fusion_path = payload.get("artifacts", {}).get("fusion")
+        payload["fusion"] = self._optional_json(self.topic_store.run_path(run_id) / fusion_path) if fusion_path else {}
         with self._lock:
             job = self._topic_jobs.get(run_id)
         if job:
@@ -280,7 +282,7 @@ class WebApp:
 
         raw = json.loads(payload)
         models = _extract_model_ids(raw)
-        return {"models": models, "suggestions": _suggest_models(models)}
+        return {"models": models, "suggestions": _suggest_models(models), "catalog_only": True}
 
     def delete_run(self, run_id: str) -> dict[str, Any]:
         if not run_id or safe_slug(run_id) != run_id:

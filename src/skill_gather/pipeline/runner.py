@@ -198,9 +198,14 @@ def run_video_pipeline(
     )
     _run_regular_stage(store, state, "timeline_merge", lambda: _write_evidence_timeline(store, state))
     if evidence_only:
-        state.status = "completed"
         state.current_stage = "timeline_merge"
-        state.failure_reason = None
+        timeline = read_json(store.evidence_timeline_path(state.run_id))
+        if _has_substantive_evidence(timeline):
+            state.status = "completed"
+            state.failure_reason = None
+        else:
+            state.status = "failed"
+            state.failure_reason = _evidence_only_failure_reason(store, state)
         store.save(state)
         return state
     _run_regular_stage(
@@ -940,6 +945,33 @@ def metadata_evidence_items(manifest: VideoSourceManifest) -> list[EvidenceItem]
     return items
 
 
+def _has_substantive_evidence(timeline: dict[str, Any]) -> bool:
+    items = timeline.get("items", [])
+    if not isinstance(items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("claim", "")).strip()
+        and not str(item.get("type", "")).startswith("metadata_")
+        for item in items
+    )
+
+
+def _evidence_only_failure_reason(store: RunStore, state: RunState) -> str:
+    details: list[str] = []
+    for artifact, label in (("asr.json", "ASR"), ("vision_ocr.json", "视觉分析")):
+        path = store.run_path(state.run_id) / artifact
+        if not path.exists():
+            continue
+        record = read_json(path)
+        status = str(record.get("status", ""))
+        if status in {"failed", "skipped"}:
+            summary = str(record.get("summary") or record.get("reason") or status).strip()
+            details.append(f"{label}: {summary}")
+    reason = "视频未生成可用于主题研究的实质证据；标题和作者元数据不能单独视为处理成功"
+    return reason + ("。" + "；".join(details) if details else "")
+
+
 def _write_distillation(
     store: RunStore,
     state: RunState,
@@ -1265,14 +1297,22 @@ def _run_package_stage(
             reason_code = media_extract.get("reason_code", "media_download_failed")
             state.failure_reason = f"media extraction failed: {reason_code}"
         else:
-            score_record = read_json(store.run_path(state.run_id) / "score.json")
-            judge_record = score_record.get("judge", {}) if isinstance(score_record, dict) else {}
-            if isinstance(judge_record, dict) and judge_record.get("status") == "skipped":
-                state.failure_reason = f"insufficient evidence: {judge_record.get('reason', 'judge skipped')}"
-            elif isinstance(judge_record, dict) and judge_record.get("status") == "failed":
-                state.failure_reason = f"insufficient evidence: judge failed: {judge_record.get('reason_code', 'judge_failed')}"
+            distillation_path = store.run_path(state.run_id) / "distillation.json"
+            distillation = read_json(distillation_path) if distillation_path.exists() else {}
+            if isinstance(distillation, dict) and distillation.get("status") == "failed":
+                reason_code = str(distillation.get("reason_code") or "distillation_failed")
+                model = str(distillation.get("model") or "").strip()
+                suffix = f" (model: {model})" if model else ""
+                state.failure_reason = f"distillation failed: {reason_code}{suffix}"
             else:
-                state.failure_reason = "insufficient evidence: final score is below the candidate threshold"
+                score_record = read_json(store.run_path(state.run_id) / "score.json")
+                judge_record = score_record.get("judge", {}) if isinstance(score_record, dict) else {}
+                if isinstance(judge_record, dict) and judge_record.get("status") == "skipped":
+                    state.failure_reason = f"insufficient evidence: {judge_record.get('reason', 'judge skipped')}"
+                elif isinstance(judge_record, dict) and judge_record.get("status") == "failed":
+                    state.failure_reason = f"insufficient evidence: judge failed: {judge_record.get('reason_code', 'judge_failed')}"
+                else:
+                    state.failure_reason = "insufficient evidence: final score is below the candidate threshold"
         state.artifacts["candidate_out_dir"] = str(Path(out_dir))
         _mark_completed(store, state, "package")
         frame_index = read_frame_index(store, state.run_id)

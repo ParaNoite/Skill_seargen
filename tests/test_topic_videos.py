@@ -9,7 +9,7 @@ from skill_gather.config import parse_config
 from skill_gather.cli import main
 from skill_gather.models import EvidenceItem, EvidenceTimeline, TopicSourceCandidate, TopicVideoRun, VideoSourceManifest
 from skill_gather.runs import RunStore, write_json
-from skill_gather.topic_videos import process_topic_videos
+from skill_gather.topic_videos import _has_substantive_timeline, process_topic_videos
 from skill_gather.topics import TopicRunStore
 
 
@@ -29,6 +29,17 @@ CONFIG = {
 
 
 class TopicVideoTests(unittest.TestCase):
+    def test_metadata_only_timeline_is_not_substantive_topic_evidence(self):
+        self.assertFalse(
+            _has_substantive_timeline(
+                {"items": [{"type": "metadata_title", "claim": "视频标题说明主题"}]}
+            )
+        )
+        self.assertTrue(
+            _has_substantive_timeline(
+                {"items": [{"type": "asr", "claim": "状态机由状态节点和转换规则组成"}]}
+            )
+        )
     def test_store_normalizes_optional_knowledge_and_hydrates_legacy_vision_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TopicRunStore(Path(temp_dir) / "runs")
@@ -105,10 +116,12 @@ class TopicVideoTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(payload["status"], "completed")
             self.assertEqual(payload["successful_video_sources"], 1)
-            self.assertIsNone(payload["knowledge"])
+            self.assertEqual(payload["knowledge"], "topic_package/knowledge.md")
+            self.assertEqual(payload["fusion"], "topic_package/fusion.json")
 
             saved = store.load(task.run_id)
-            self.assertIsNone(saved.package.knowledge)
+            self.assertEqual(saved.package.knowledge, "topic_package/knowledge.md")
+            self.assertEqual(saved.package.fusion, "topic_package/fusion.json")
 
     def test_successful_and_failed_video_runs_are_isolated_and_auditable(self):
         with tempfile.TemporaryDirectory() as temp_dir:

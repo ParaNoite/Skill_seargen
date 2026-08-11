@@ -29,6 +29,51 @@ class FakeResponse:
 
 
 class NewApiClientTests(unittest.TestCase):
+    def test_probe_model_marks_catalogued_but_unknown_model_unavailable(self):
+        error = urllib.error.HTTPError(
+            "https://api.example.test/v1/chat/completions",
+            404,
+            "Not Found",
+            None,
+            BytesIO(b'{"error":"unknown model"}'),
+        )
+        with patch("skill_gather.integrations.newapi.urllib.request.urlopen", side_effect=error):
+            result = NewApiClient(
+                base_url="https://api.example.test/v1",
+                api_key="secret-key",
+            ).probe_model("catalog-only-model", "vision")
+
+        self.assertEqual(result["model"], "catalog-only-model")
+        self.assertFalse(result["available"])
+        self.assertEqual(result["error_code"], "model_probe_failed")
+        self.assertEqual(result["status_code"], 404)
+
+    def test_probe_model_uses_inline_image_for_vision(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse({"choices": [{"message": {"content": "red"}}]}),
+        ) as urlopen:
+            result = NewApiClient(
+                base_url="https://api.example.test/v1",
+                api_key="secret-key",
+            ).probe_model("vision-model", "vision")
+
+        body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertTrue(result["available"])
+        self.assertEqual(body["messages"][0]["content"][1]["type"], "image_url")
+
+    def test_probe_model_rejects_text_only_response_to_vision_prompt(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse({"choices": [{"message": {"content": "OK"}}]}),
+        ):
+            result = NewApiClient(
+                base_url="https://api.example.test/v1",
+                api_key="secret-key",
+            ).probe_model("text-model", "vision")
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["summary"], "model_probe_unexpected_response")
     def test_search_intent_and_candidate_assessment_are_schema_limited(self):
         client = NewApiClient(base_url="https://api.example.test/v1", api_key="secret-key")
         with patch.object(

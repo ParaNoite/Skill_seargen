@@ -137,17 +137,19 @@ def process_topic_videos(
         timeline_path = child_store.evidence_timeline_path(state.run_id)
         timeline = read_json(timeline_path) if timeline_path.exists() else {}
         evidence_path = f"{package.evidence}/video-{_safe_component(candidate.candidate_id)}.json"
+        has_substantive_evidence = _has_substantive_timeline(timeline)
+        completed = state.status == "completed" and has_substantive_evidence
         entry = TopicVideoRun(
             parent_run_id=task.run_id,
             candidate_id=candidate.candidate_id,
             child_run_id=state.run_id,
             source_url=candidate.canonical_url or candidate.url,
-            status="completed" if state.status == "completed" and timeline.get("items") else "failed",
+            status="completed" if completed else "failed",
             title=str(child_manifest.get("title", "")),
             duration_sec=duration_sec,
             model_calls=child_calls,
             evidence_path=evidence_path,
-            failure_reason=None if state.status == "completed" and timeline.get("items") else (state.failure_reason or "视频未生成可用证据"),
+            failure_reason=None if completed else (state.failure_reason or "视频仅生成元数据，未生成可用于主题研究的实质证据"),
             vision_status=vision_status,
             vision_reason=vision_reason,
         )
@@ -195,6 +197,18 @@ def _is_selected_video(entry: TopicVideoRun, selected: list[TopicSourceCandidate
 
 def _safe_component(value: str) -> str:
     return safe_slug(value) or "video-source"
+
+
+def _has_substantive_timeline(timeline: dict[str, Any]) -> bool:
+    items = timeline.get("items", [])
+    if not isinstance(items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("claim", "")).strip()
+        and not str(item.get("type", "")).startswith("metadata_")
+        for item in items
+    )
 
 
 def _safe_reason(exc: Exception) -> str:

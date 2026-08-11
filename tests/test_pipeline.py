@@ -245,6 +245,36 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((store.run_path(result.run_id) / "distillation.json").exists())
             self.assertTrue(store.evidence_timeline_path(result.run_id).exists())
 
+    def test_evidence_only_pipeline_fails_when_only_metadata_evidence_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source(url)
+            state = store.start_or_resume(source.source, source.source_id)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=build_initial_manifest(url, source),
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "只有标题", "duration": 60}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(
+                    NewApiError("ASR unavailable", code="transcription_failed", status_code=503)
+                ),
+                vision_client=FakeVisionClient(),
+                vision_mode="off",
+                evidence_only=True,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("实质证据", result.failure_reason)
+            timeline = read_json(store.evidence_timeline_path(result.run_id))
+            self.assertEqual({item["type"] for item in timeline["items"]}, {"metadata_title"})
+
     def test_run_video_pipeline_writes_successful_vision_ocr_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             url = "https://www.bilibili.com/video/BV1xx411c7mD/"
@@ -788,6 +818,34 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("[redacted-url]", distillation["summary"])
             self.assertNotIn("token=x", distillation["summary"])
             self.assertIn("distillation_failed", saved_manifest["risk_flags"])
+
+    def test_distillation_model_failure_is_exposed_in_run_failure_reason(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = parse_config(CONFIG)
+            store = RunStore(Path(temp_dir) / "runs")
+            source = infer_source("https://www.bilibili.com/video/BV1xx411c7mD/")
+            state = store.start_or_resume(source.source, source.source_id)
+            manifest = build_initial_manifest("https://www.bilibili.com/video/BV1xx411c7mD/", source)
+            store.save_manifest(state.run_id, manifest)
+
+            result = run_video_pipeline(
+                config=config,
+                store=store,
+                state=state,
+                manifest=manifest,
+                out_dir=Path(temp_dir) / "skills",
+                metadata_probe=FakeMetadataProbe({"title": "Skill Demo", "duration": 120}),
+                media_downloader=FakeMediaDownloader(),
+                media_processor=FakeMediaProcessor(),
+                asr_client=FakeAsrClient(),
+                vision_client=FakeVisionClient(),
+                distiller_client=FakeDistillerClient(NewApiError("unknown model", code="model_error", status_code=404)),
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("distillation failed: model_error", result.failure_reason or "")
+            self.assertIn("model:", result.failure_reason or "")
+            self.assertTrue((store.run_path(result.run_id) / "failure_report.md").exists())
 
     def test_run_video_pipeline_retries_recoverable_distillation_and_audits_attempts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

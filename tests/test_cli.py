@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from skill_gather.integrations import YtDlpError
-from skill_gather.cli import main
+from skill_gather.cli import _complete_topic_generation, _create_web_server, _print_json, main
+from skill_gather.topics import TopicRunStore
 
 
 CONFIG = {
@@ -29,6 +30,68 @@ CONFIG = {
 
 
 class CliTests(unittest.TestCase):
+    def test_web_server_retries_with_system_port_after_windows_bind_error(self):
+        error = OSError("permission denied")
+        error.winerror = 10013
+        server = object()
+        create_server = unittest.mock.Mock(side_effect=[error, server])
+        args = unittest.mock.Mock(host="127.0.0.1", port=8765, config="config.json", runs="runs", out="skills")
+
+        result = _create_web_server(create_server, args)
+
+        self.assertIs(result, server)
+        self.assertEqual(create_server.call_args_list[0].kwargs["port"], 8765)
+        self.assertEqual(create_server.call_args_list[1].kwargs["port"], 0)
+
+    def test_model_check_reports_real_probe_status_without_echoing_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"SKILL_GATHER_TEST_NEWAPI_API_KEY": "secret-key"}, clear=True), patch(
+                "skill_gather.cli.NewApiClient.probe_model",
+                side_effect=[
+                    {"model": "vision", "capability": "vision", "available": False, "error_code": "model_probe_failed", "status_code": 404, "summary": "unknown model"},
+                    {"model": "distiller", "capability": "text", "available": True},
+                    {"model": "judge", "capability": "text", "available": True},
+                ],
+            ):
+                exit_code = main(["model-check", "--config", str(config_path)], stdout=stdout)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["probes"][0]["available"])
+        self.assertNotIn("secret-key", stdout.getvalue())
+
+    def test_scoring_rerun_does_not_regenerate_technical_skill(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("评分重跑", mode="technical")
+            task.status = "scoring"
+            task.current_stage = "scoring"
+            skill_path = store.run_path(task.run_id) / "topic_package/SKILL.md"
+            skill_path.write_text("existing skill", encoding="utf-8")
+            store.save(task)
+            fusion = {"conclusions": []}
+
+            with patch("skill_gather.cli.generate_technical_skill") as generate, patch(
+                "skill_gather.cli.rescore_technical_package",
+                return_value=(store.run_path(task.run_id) / "topic_package/score.json", {"final_status": "needs_review"}),
+            ):
+                result = _complete_topic_generation(store, task, store.run_path(task.run_id), fusion)
+
+        self.assertEqual(result.status, "completed")
+        generate.assert_not_called()
+    def test_json_output_falls_back_to_ascii_on_gbk_stream(self):
+        buffer = io.BytesIO()
+        stdout = io.TextIOWrapper(buffer, encoding="gbk")
+
+        _print_json({"title": "Godot 4.6 🚀"}, stdout)
+        stdout.flush()
+
+        payload = json.loads(buffer.getvalue().decode("gbk"))
+        self.assertEqual(payload["title"], "Godot 4.6 🚀")
+
     def test_topic_create_and_inspect_persist_a_theme_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             runs_dir = Path(temp_dir) / "runs"

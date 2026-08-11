@@ -281,6 +281,7 @@ class TopicPackage:
     evidence: str
     references: str
     knowledge: str | None = None
+    fusion: str | None = None
     skill: str | None = None
     score: str | None = None
 

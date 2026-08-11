@@ -20,9 +20,35 @@ from skill_gather.github_processing import (
 from skill_gather.models import TopicSourceCandidate
 from skill_gather.topic_processing import process_web_sources, write_knowledge_markdown
 from skill_gather.topics import TopicRunStore
+from skill_gather.web_text import _TextExtractor
 
 
 class TopicProcessingTests(unittest.TestCase):
+    def test_web_text_prefers_main_content_over_large_navigation_sidebar(self):
+        extractor = _TextExtractor()
+        extractor.feed(
+            "<html><head><title>NavigationAgent 指南</title></head><body>"
+            "<nav>" + "站点目录 无关菜单 " * 100 + "</nav>"
+            "<div role='main'><div itemprop='articleBody'><h1>使用 NavigationAgent</h1>"
+            "<p>NavigationAgent2D 提供路径寻找、路径跟随和代理避障功能。</p>"
+            "<p>设置 target_position 后，应在物理帧中读取下一个路径位置并移动父节点。</p>"
+            "</div></div></body></html>"
+        )
+
+        title, text = extractor.extracted()
+
+        self.assertEqual(title, "NavigationAgent 指南")
+        self.assertIn("NavigationAgent2D 提供路径寻找", text)
+        self.assertNotIn("站点目录", text)
+
+    def test_web_text_falls_back_to_full_page_without_semantic_content_region(self):
+        extractor = _TextExtractor()
+        extractor.feed("<html><body><div>" + "普通网页正文内容。" * 20 + "</div></body></html>")
+
+        _title, text = extractor.extracted()
+
+        self.assertIn("普通网页正文内容", text)
+
     def test_github_text_fetch_retries_transient_tls_disconnects(self):
         from unittest.mock import patch
 
@@ -361,6 +387,91 @@ class TopicProcessingTests(unittest.TestCase):
         self.assertTrue(snapshot.truncated)
         self.assertEqual(snapshot.fallback_reason, "github_api_rate_limit_fallback")
 
+    def test_github_fetch_falls_back_to_default_branch_readme_when_tree_times_out(self):
+        from unittest.mock import patch
+
+        metadata = {
+            "default_branch": "stable",
+            "full_name": "example/toolkit",
+            "html_url": "https://github.com/example/toolkit",
+        }
+
+        def read_public_file(url, **_kwargs):
+            self.assertTrue(url.endswith("/stable/README.md"))
+            return "# Toolkit\n\nInstall with pip install toolkit."
+
+        with patch(
+            "skill_gather.github_processing._get_json",
+            side_effect=[metadata, urllib.error.URLError("tree timed out")],
+        ), patch(
+            "skill_gather.github_processing._get_text",
+            side_effect=read_public_file,
+        ):
+            snapshot = fetch_public_github_repository("https://github.com/example/toolkit")
+
+        self.assertEqual(snapshot.default_branch, "stable")
+        self.assertEqual(snapshot.fallback_reason, "github_network_readme_fallback")
+        self.assertEqual([file.path for file in snapshot.files], ["README.md"])
+
+    def test_github_fetch_falls_back_to_readme_when_selected_contents_file_times_out(self):
+        from unittest.mock import patch
+
+        metadata = {
+            "default_branch": "main",
+            "full_name": "example/toolkit",
+            "html_url": "https://github.com/example/toolkit",
+        }
+        tree = {"tree": [{"type": "blob", "path": "docs/api.md"}]}
+
+        def read_public_file(url, **_kwargs):
+            if "/contents/docs/api.md?ref=main" in url:
+                raise TimeoutError("raw file timed out")
+            if url.endswith("/main/README.md"):
+                return "# Toolkit\n\nInstall with pip install toolkit."
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with patch(
+            "skill_gather.github_processing._get_json",
+            side_effect=[metadata, tree],
+        ), patch(
+            "skill_gather.github_processing._get_text",
+            side_effect=read_public_file,
+        ):
+            snapshot = fetch_public_github_repository("https://github.com/example/toolkit")
+
+        self.assertEqual(snapshot.fallback_reason, "github_network_readme_fallback")
+        self.assertEqual([file.path for file in snapshot.files], ["README.md"])
+
+    def test_github_network_readme_fallback_is_explained_in_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Skill 工具开发", mode="technical")
+            candidate = TopicSourceCandidate(
+                url="https://github.com/example/toolkit",
+                candidate_id="cand-github",
+                source_type="github",
+                selected=True,
+            )
+            task.selected_sources = [candidate]
+
+            result = process_github_sources(
+                task,
+                store.run_path(task.run_id),
+                fetcher=lambda *_args, **_kwargs: GitHubRepositorySnapshot(
+                    repo="example/toolkit",
+                    html_url="https://github.com/example/toolkit",
+                    default_branch="main",
+                    files=[GitHubFile("README.md", "Install with pip install toolkit.")],
+                    truncated=True,
+                    fallback_reason="github_network_readme_fallback",
+                ),
+            )
+
+            evidence = result.evidence[0]
+            self.assertIn("github_network_readme_fallback", evidence["risk_flags"])
+            self.assertIn("github_file_selection_truncated", evidence["risk_flags"])
+            self.assertTrue(any("网络超时" in item and "README" in item for item in evidence["limitations"]))
+
     def test_topic_process_command_completes_technical_github_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TopicRunStore(Path(temp_dir) / "runs")
@@ -401,9 +512,11 @@ class TopicProcessingTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(payload["status"], "completed")
             self.assertEqual(payload["successful_github_sources"], 1)
-            self.assertIsNone(payload["knowledge"])
+            self.assertEqual(payload["knowledge"], "topic_package/knowledge.md")
+            self.assertEqual(payload["fusion"], "topic_package/fusion.json")
             saved = store.load(task.run_id)
             self.assertEqual(saved.artifacts["github_processing_audit"], "github_processing_audit.json")
+            self.assertEqual(saved.artifacts["fusion"], "topic_package/fusion.json")
 
 
 if __name__ == "__main__":

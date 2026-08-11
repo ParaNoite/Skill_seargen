@@ -14,6 +14,20 @@ FasterWhisperImportError = (
 )
 
 
+def _project_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "skill_gather").is_dir():
+            return parent
+    return Path.cwd()
+
+
+def _configure_hugging_face_environment() -> Path:
+    os.environ.setdefault("HF_HOME", str(_project_root() / ".hf-cache"))
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    return Path(os.environ.get("HF_HUB_CACHE", Path(os.environ["HF_HOME"]) / "hub"))
+
+
 def is_faster_whisper_model(model: str) -> bool:
     return str(model).strip().lower().startswith(("faster-whisper:", "faster_whisper:"))
 
@@ -42,17 +56,23 @@ class FasterWhisperClient:
         if not path.exists():
             raise NewApiError("audio file does not exist", code="audio_file_missing")
 
+        model_cache = _configure_hugging_face_environment()
         try:
             from faster_whisper import WhisperModel
+            from huggingface_hub.errors import LocalEntryNotFoundError
         except ImportError as exc:
             raise NewApiError(FasterWhisperImportError, code="faster_whisper_missing") from exc
 
         try:
-            whisper = WhisperModel(
-                self.model_name,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
+            model_options = {
+                "device": self.device,
+                "compute_type": self.compute_type,
+                "download_root": str(model_cache),
+            }
+            try:
+                whisper = WhisperModel(self.model_name, local_files_only=True, **model_options)
+            except LocalEntryNotFoundError:
+                whisper = WhisperModel(self.model_name, **model_options)
             segments, info = whisper.transcribe(str(path))
             segment_items = [
                 {

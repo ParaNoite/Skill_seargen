@@ -92,6 +92,7 @@ class ModelRoundTripTests(unittest.TestCase):
                 sources="topic_package/sources.json",
                 evidence="topic_package/evidence",
                 references="topic_package/references",
+                fusion="topic_package/fusion.json",
             ),
         )
 
@@ -101,6 +102,7 @@ class ModelRoundTripTests(unittest.TestCase):
         self.assertEqual(restored.budget.max_candidates, 12)
         self.assertIsNone(restored.package.skill)
         self.assertEqual(restored.package.references, "topic_package/references")
+        self.assertEqual(restored.package.fusion, "topic_package/fusion.json")
 
     def test_topic_task_round_trips_normal_mode_without_optional_package(self):
         task = TopicTask(run_id="topic-drawing-12345678", topic="绘画入门")

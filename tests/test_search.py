@@ -14,7 +14,9 @@ from skill_gather.search import (
     GitHubSearchProvider,
     SearchCache,
     SearXNGProvider,
+    build_queries,
     canonicalize_url,
+    infer_source_type,
     normalize_candidates,
     search_topic,
 )
@@ -36,6 +38,52 @@ CONFIG = {
 
 
 class SearchTests(unittest.TestCase):
+    def test_github_issue_and_pull_urls_are_web_evidence_not_repository_sources(self):
+        self.assertEqual(infer_source_type("https://github.com/godotengine/godot"), "github")
+        self.assertEqual(infer_source_type("https://github.com/godotengine/godot/issues/88648"), "web")
+        self.assertEqual(infer_source_type("https://github.com/godotengine/godot/pull/123"), "web")
+
+    def test_github_queries_add_latin_technical_fallback_for_mixed_language_topic(self):
+        queries = build_queries(
+            "Godot NavigationAgent2D 寻路避障",
+            "technical",
+            "github",
+            max_queries=2,
+        )
+
+        self.assertEqual(queries, ["Godot NavigationAgent2D 寻路避障", "Godot NavigationAgent2D"])
+
+    def test_github_queries_keep_example_variant_for_latin_topic(self):
+        queries = build_queries("Godot StateCharts", "technical", "github", max_queries=2)
+
+        self.assertEqual(queries, ["Godot StateCharts", "Godot StateCharts example"])
+
+    def test_github_queries_focus_long_latin_topic(self):
+        queries = build_queries(
+            "Godot 4 NavigationAgent2D avoidance velocity_computed implementation",
+            "technical",
+            "github",
+            max_queries=2,
+        )
+
+        self.assertEqual(
+            queries,
+            [
+                "Godot 4 NavigationAgent2D avoidance velocity_computed implementation",
+                "Godot NavigationAgent2D",
+            ],
+        )
+
+    def test_github_queries_keep_core_noun_phrase_without_identifier(self):
+        queries = build_queries(
+            "Godot 4 typed signal event bus autoload decoupled communication",
+            "technical",
+            "github",
+            max_queries=2,
+        )
+
+        self.assertEqual(queries[1], "Godot signal event bus")
+
     def test_canonicalize_url_removes_tracking_and_fragment(self):
         self.assertEqual(
             canonicalize_url("HTTPS://Example.COM:443/path?utm_source=x&b=2#section"),
@@ -141,6 +189,21 @@ class SearchTests(unittest.TestCase):
         self.assertEqual({candidate.source_type for candidate in candidates}, {"video", "github", "web"})
         self.assertEqual(intent.strategy, "deterministic")
         self.assertTrue(candidates[0].score_breakdown)
+
+    def test_state_machine_candidate_ranks_above_broad_godot_matches(self):
+        batch = FakeSearchProvider(
+            {
+                "*": [
+                    RawSearchResult("bilibili", "Godot 4 角色状态机设计", 1, "https://www.bilibili.com/video/BV1xx411c7mD/", "Godot 4 UI 选项卡"),
+                    RawSearchResult("bilibili", "Godot 4 角色状态机设计", 2, "https://www.bilibili.com/video/BV1yy411c7mD/", "Godot4 有限状态机教程"),
+                ]
+            }
+        ).search(["Godot 4 角色状态机设计"], max_results=10)
+
+        candidates = normalize_candidates("Godot 4 角色状态机设计", [batch], max_candidates=10)
+
+        self.assertIn("状态机", candidates[0].title)
+        self.assertGreater(candidates[0].quality_score, candidates[1].quality_score)
 
     def test_searxng_without_url_fails_explicitly(self):
         with self.assertRaises(Exception) as context:

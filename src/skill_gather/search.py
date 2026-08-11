@@ -439,9 +439,30 @@ def provider_names_for_mode(mode: str) -> list[str]:
 
 def build_queries(topic: str, mode: str, provider: str, *, max_queries: int, extra_queries: list[str] | None = None) -> list[str]:
     base = topic.strip()
+    github_terms = _unique(re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]*", base))
+    generic_github_terms = {
+        "and", "architecture", "best", "communication", "decoupled", "failure",
+        "handling", "implementation", "practices", "progress", "technical", "typed", "workflow",
+    }
+    focused_github_terms = [
+        term
+        for term in github_terms
+        if term.lower() != "godot" and term.lower() not in generic_github_terms
+    ]
+    identifier_terms = [
+        term
+        for term in focused_github_terms
+        if "_" in term or any(character.isupper() for character in term[1:]) or any(character.isdigit() for character in term)
+    ]
+    focus = identifier_terms[:1] or focused_github_terms[:3]
+    github_fallback = " ".join(
+        (["Godot"] if any(term.lower() == "godot" for term in github_terms) else [])
+        + focus
+    )
+    github_queries = [base, github_fallback if github_fallback and github_fallback != base else f"{base} example"]
     templates = {
         "bilibili": [base, f"{base} 教程"],
-        "github": [base, f"{base} example"],
+        "github": github_queries,
         "searxng": [base, f"{base} 教程", f"{base} official documentation", f"{base} GitHub" if mode == "technical" else f"{base} 实践"],
         "fake": [base],
     }
@@ -640,15 +661,19 @@ def infer_source_type(url: str) -> str:
     host = (parsed.hostname or "").lower()
     if host in _BILIBILI_HOSTS or host.endswith(".bilibili.com"):
         return "video"
-    if host == "github.com" and len([part for part in parsed.path.split("/") if part]) >= 2:
+    parts = [part for part in parsed.path.split("/") if part]
+    if host == "github.com" and len(parts) == 2:
         return "github"
     return "web" if host else "unknown"
 
 
 def score_candidate(topic: str, title: str, summary: str, source_type: str, risks: list[str]) -> int:
-    tokens = [token.lower() for token in re.findall(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,}", topic)]
     haystack = f"{title} {summary}".lower()
-    relevance = min(40, 12 + 10 * sum(token in haystack for token in tokens))
+    latin_tokens = [token.lower() for token in re.findall(r"[A-Za-z]+|[0-9]+", topic)]
+    latin_score = sum((8 if token.isalpha() else 2) for token in latin_tokens if token in haystack)
+    chinese_segments = re.findall(r"[\u4e00-\u9fff]{2,}", topic)
+    chinese_match = max((_longest_common_substring_length(segment, haystack) for segment in chinese_segments), default=0)
+    relevance = min(40, 8 + latin_score + chinese_match * 4)
     trust = {"github": 25, "video": 18, "web": 14}.get(source_type, 5)
     completeness = (8 if title else 0) + (7 if summary else 0)
     freshness = 5
@@ -672,7 +697,28 @@ def _is_severe_download_spam(value: str) -> bool:
 
 def _matched_facets(title: str, summary: str, facets: list[str]) -> list[str]:
     haystack = f"{title} {summary}".lower()
-    return [facet for facet in facets if facet and facet.lower() in haystack][:3]
+    return [facet for facet in facets if facet and _facet_matches(facet, haystack)][:3]
+
+
+def _facet_matches(facet: str, haystack: str) -> bool:
+    lowered = facet.lower()
+    if lowered in haystack:
+        return True
+    chinese_segments = re.findall(r"[\u4e00-\u9fff]{2,}", lowered)
+    return any(_longest_common_substring_length(segment, haystack) >= min(3, len(segment)) for segment in chinese_segments)
+
+
+def _longest_common_substring_length(left: str, right: str) -> int:
+    previous = [0] * (len(right) + 1)
+    longest = 0
+    for left_char in left:
+        current = [0] * (len(right) + 1)
+        for index, right_char in enumerate(right, start=1):
+            if left_char == right_char:
+                current[index] = previous[index - 1] + 1
+                longest = max(longest, current[index])
+        previous = current
+    return longest
 
 
 def assess_candidates(candidates: list[TopicSourceCandidate], intent: SearchIntent, client: NewApiClient | None, model: str, *, use_llm: bool) -> str | None:

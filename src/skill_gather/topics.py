@@ -74,6 +74,9 @@ class TopicRunStore:
                 evidence=f"{package_root}/evidence",
                 references=f"{package_root}/references",
                 knowledge=None,
+                fusion=f"{package_root}/fusion.json",
+                skill=f"{package_root}/SKILL.md" if mode == "technical" else None,
+                score=f"{package_root}/score.json" if mode == "technical" else None,
             ),
             artifacts={
                 "topic_package": package_root,
@@ -115,6 +118,15 @@ class TopicRunStore:
                 package.knowledge = None
                 task.artifacts.pop("knowledge", None)
 
+        if package is not None:
+            if not package.fusion:
+                package.fusion = f"{package.root}/fusion.json"
+            fusion_path = self.run_path(task.run_id) / package.fusion
+            if fusion_path.exists():
+                task.artifacts.setdefault("fusion", package.fusion)
+            else:
+                task.artifacts.pop("fusion", None)
+
         for video_run in task.video_runs:
             if not video_run.child_run_id or video_run.vision_status:
                 continue
@@ -155,6 +167,30 @@ class TopicRunStore:
             raise ValueError("只有失败的主题 run 可以恢复")
         task.status = task.failure_stage or "created"
         task.current_stage = task.status
+        self.save(task)
+        return task
+
+    def rerun(self, run_id: str, stage: str) -> TopicTask:
+        if stage not in {"processing_sources", "generating", "scoring"}:
+            raise ValueError("重跑阶段必须是 processing_sources、generating 或 scoring")
+        task = self.load(run_id)
+        previous_status = task.status
+        task.status = stage
+        task.current_stage = stage
+        task.failure_reason = None
+        task.failure_stage = None
+        audit_path = self.run_path(run_id) / "rerun_audit.json"
+        audit = read_json(audit_path) if audit_path.exists() else {"run_id": run_id, "entries": []}
+        entries = audit.get("entries", []) if isinstance(audit, dict) else []
+        entries.append(
+            {
+                "requested_at": datetime.now(UTC).isoformat(),
+                "from_status": previous_status,
+                "stage": stage,
+            }
+        )
+        write_json(audit_path, {"run_id": run_id, "entries": entries})
+        task.artifacts["rerun_audit"] = "rerun_audit.json"
         self.save(task)
         return task
 

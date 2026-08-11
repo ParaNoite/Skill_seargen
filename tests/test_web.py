@@ -27,6 +27,26 @@ CONFIG = {
 
 
 class WebAppTests(unittest.TestCase):
+    def test_topic_detail_exposes_fusion_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            created = app.create_topic("融合主题", mode="technical")
+            task = app.topic_store.load(created["run_id"])
+            task.artifacts["fusion"] = "topic_package/fusion.json"
+            fusion_path = app.topic_store.run_path(task.run_id) / task.artifacts["fusion"]
+            fusion_path.write_text(
+                json.dumps({"conclusions": [{"conclusion_id": "C1"}], "conflicts": [], "evidence_gaps": []}),
+                encoding="utf-8",
+            )
+            app.topic_store.save(task)
+
+            detail = app.get_topic(task.run_id)
+
+            self.assertEqual(detail["fusion"]["conclusions"][0]["conclusion_id"], "C1")
+
     def test_failed_topic_can_resume_for_processing_retry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -283,6 +303,7 @@ class WebHttpTests(unittest.TestCase):
         self.assertIn("whisper-large-v3", parsed["suggestions"]["asr"])
         self.assertIn("qwen-vl-plus", parsed["suggestions"]["vision"])
         self.assertIn("deepseek-chat", parsed["suggestions"]["text"])
+        self.assertTrue(parsed["catalog_only"])
         self.assertNotIn("secret-key", body)
 
     def test_lists_models_with_literal_config_api_key(self):

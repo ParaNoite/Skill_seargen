@@ -30,6 +30,7 @@ _ROOT_FILE_NAMES = {
 }
 _TEXT_EXTENSIONS = {".md", ".txt", ".py", ".js", ".ts", ".json", ".toml", ".yaml", ".yml", ".gd", ".cs"}
 _NETWORK_RETRY_DELAYS = (0.25, 0.5)
+_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError)
 
 
 @dataclass(slots=True)
@@ -159,7 +160,8 @@ def fetch_public_github_repository(
                 repo,
                 timeout_sec=timeout_sec,
                 max_bytes=max_bytes,
-                rate_limit_error=exc,
+                fallback_reason="github_api_rate_limit_fallback",
+                original_error=exc,
             )
         raise
     if bool(metadata.get("private")):
@@ -167,17 +169,34 @@ def fetch_public_github_repository(
     default_branch = str(metadata.get("default_branch") or "main")
     full_name = str(metadata.get("full_name") or f"{owner}/{repo}")
     html_url = str(metadata.get("html_url") or f"https://github.com/{owner}/{repo}")
-    tree_url = f"{repo_api}/git/trees/{quote(default_branch, safe='')}?recursive=1"
-    tree_payload = _get_json(tree_url, timeout_sec=timeout_sec, token=token)
-    tree = tree_payload.get("tree", []) if isinstance(tree_payload, dict) else []
-    if not isinstance(tree, list):
-        raise GitHubProcessingError("GitHub 仓库树响应格式无效")
-    paths = select_interesting_paths([item for item in tree if isinstance(item, dict)], max_files=max_files)
-    files: list[GitHubFile] = []
-    for path in paths:
-        raw_url = f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/{quote(default_branch, safe='')}/{quote(path)}"
-        text = _get_text(raw_url, timeout_sec=timeout_sec, max_bytes=max_bytes)
-        files.append(GitHubFile(path=path, text=text, html_url=f"{html_url}/blob/{default_branch}/{path}"))
+    try:
+        tree_url = f"{repo_api}/git/trees/{quote(default_branch, safe='')}?recursive=1"
+        tree_payload = _get_json(tree_url, timeout_sec=timeout_sec, token=token)
+        tree = tree_payload.get("tree", []) if isinstance(tree_payload, dict) else []
+        if not isinstance(tree, list):
+            raise GitHubProcessingError("GitHub 仓库树响应格式无效")
+        paths = select_interesting_paths([item for item in tree if isinstance(item, dict)], max_files=max_files)
+        files: list[GitHubFile] = []
+        for path in paths:
+            contents_url = f"{repo_api}/contents/{quote(path)}?ref={quote(default_branch, safe='')}"
+            text = _get_text(
+                contents_url,
+                timeout_sec=timeout_sec,
+                max_bytes=max_bytes,
+                accept="application/vnd.github.raw+json",
+                token=token,
+            )
+            files.append(GitHubFile(path=path, text=text, html_url=f"{html_url}/blob/{default_branch}/{path}"))
+    except _NETWORK_ERRORS as exc:
+        return _fetch_public_readme_fallback(
+            owner,
+            repo,
+            timeout_sec=timeout_sec,
+            max_bytes=max_bytes,
+            fallback_reason="github_network_readme_fallback",
+            original_error=exc,
+            preferred_branch=default_branch,
+        )
     return GitHubRepositorySnapshot(
         repo=full_name,
         html_url=html_url,
@@ -193,10 +212,13 @@ def _fetch_public_readme_fallback(
     *,
     timeout_sec: int,
     max_bytes: int,
-    rate_limit_error: urllib.error.HTTPError,
+    fallback_reason: str,
+    original_error: BaseException,
+    preferred_branch: str = "",
 ) -> GitHubRepositorySnapshot:
     html_url = f"https://github.com/{owner}/{repo}"
-    for branch in ("main", "master"):
+    branches = list(dict.fromkeys(branch for branch in (preferred_branch, "main", "master") if branch))
+    for branch in branches:
         for path in ("README.md", "README", "readme.md", "Readme.md"):
             raw_url = f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/{branch}/{path}"
             try:
@@ -212,9 +234,9 @@ def _fetch_public_readme_fallback(
                     default_branch=branch,
                     files=[GitHubFile(path=path, text=text, html_url=f"{html_url}/blob/{branch}/{path}")],
                     truncated=True,
-                    fallback_reason="github_api_rate_limit_fallback",
+                    fallback_reason=fallback_reason,
                 )
-    raise rate_limit_error
+    raise original_error
 
 
 def parse_github_repo(url: str) -> tuple[str, str]:
@@ -287,8 +309,10 @@ def build_github_evidence(
         "仅分析公开 GitHub 仓库中的少量文本文件，不 clone 仓库，不执行代码。",
         "已有 Codex / Anthropic skill 格式材料只作为参考降级处理，不直接等同于最终生成结果。",
     ]
-    if snapshot.fallback_reason:
+    if snapshot.fallback_reason == "github_api_rate_limit_fallback":
         limitations.append("GitHub API 触发匿名速率限制，本次仅通过公开 raw 地址读取 README。")
+    elif snapshot.fallback_reason == "github_network_readme_fallback":
+        limitations.append("GitHub 仓库树或文件读取发生网络超时，本次降级为仅读取公开 README。")
     record = {
         "source_id": f"G{source_number}",
         "candidate_id": candidate.candidate_id,
@@ -332,7 +356,7 @@ def _get_text(
     token: str = "",
     truncate: bool = True,
 ) -> str:
-    headers = {"User-Agent": "skill-seargen/0.7", "Accept": accept}
+    headers = {"User-Agent": "skill-seargen/0.8", "Accept": accept}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     for attempt in range(len(_NETWORK_RETRY_DELAYS) + 1):
@@ -344,7 +368,7 @@ def _get_text(
             break
         except urllib.error.HTTPError:
             raise
-        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError):
+        except _NETWORK_ERRORS:
             if attempt >= len(_NETWORK_RETRY_DELAYS):
                 raise
             time.sleep(_NETWORK_RETRY_DELAYS[attempt])

@@ -84,6 +84,20 @@ class RunStoreTests(unittest.TestCase):
 
             self.assertNotEqual(normal.run_id, technical.run_id)
 
+    def test_completed_topic_can_rerun_from_generation_with_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(temp_dir)
+            task = store.start_or_resume("Godot 导航", mode="technical")
+            task.status = "completed"
+            task.current_stage = "completed"
+            store.save(task)
+
+            rerun = store.rerun(task.run_id, "generating")
+
+            self.assertEqual(rerun.status, "generating")
+            self.assertEqual(rerun.artifacts["rerun_audit"], "rerun_audit.json")
+            self.assertTrue((store.run_path(task.run_id) / "rerun_audit.json").exists())
+
     def test_topic_run_fails_with_an_explanation_when_usage_exceeds_budget(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TopicRunStore(temp_dir)

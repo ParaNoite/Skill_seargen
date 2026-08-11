@@ -32,9 +32,10 @@ class WebPage:
 
 class _TextExtractor(HTMLParser):
     _ignored_tags = {"script", "style", "noscript", "svg", "template"}
+    _content_tags = {"article", "main"}
     _block_tags = {
         "article", "blockquote", "br", "div", "h1", "h2", "h3", "h4",
-        "h5", "h6", "li", "p", "section", "td", "th",
+        "h5", "h6", "li", "main", "p", "section", "td", "th",
     }
 
     def __init__(self) -> None:
@@ -43,15 +44,29 @@ class _TextExtractor(HTMLParser):
         self._in_title = False
         self._title_parts: list[str] = []
         self._parts: list[str] = []
+        self._content_depth = 0
+        self._content_parts: list[str] = []
+        self._element_stack: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
+        attributes = {name.lower(): (value or "").lower() for name, value in attrs}
+        is_content = (
+            lowered in self._content_tags
+            or attributes.get("role") == "main"
+            or attributes.get("itemprop") == "articlebody"
+        )
+        self._element_stack.append((lowered, is_content))
         if lowered in self._ignored_tags:
             self._ignored_depth += 1
         elif lowered == "title":
             self._in_title = True
-        elif lowered in self._block_tags:
+        if is_content:
+            self._content_depth += 1
+        if lowered in self._block_tags:
             self._parts.append("\n")
+            if self._content_depth:
+                self._content_parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
@@ -59,8 +74,15 @@ class _TextExtractor(HTMLParser):
             self._ignored_depth -= 1
         elif lowered == "title":
             self._in_title = False
-        elif lowered in self._block_tags:
+        if lowered in self._block_tags:
             self._parts.append("\n")
+            if self._content_depth:
+                self._content_parts.append("\n")
+        matching_indexes = [index for index, (name, _is_content) in enumerate(self._element_stack) if name == lowered]
+        if matching_indexes:
+            popped = self._element_stack[matching_indexes[-1] :]
+            del self._element_stack[matching_indexes[-1] :]
+            self._content_depth = max(0, self._content_depth - sum(is_content for _name, is_content in popped))
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth:
@@ -68,11 +90,14 @@ class _TextExtractor(HTMLParser):
         if self._in_title:
             self._title_parts.append(data)
         self._parts.append(data)
+        if self._content_depth:
+            self._content_parts.append(data)
 
     def extracted(self) -> tuple[str, str]:
         title = _compact(" ".join(self._title_parts))
-        lines = [_compact(line) for line in "".join(self._parts).splitlines()]
-        text = "\n".join(line for line in lines if line)
+        text = _lines(self._content_parts)
+        if len(text) < 80:
+            text = _lines(self._parts)
         return title, text
 
 
@@ -148,6 +173,11 @@ def score_web_page(text: str, *, candidate_quality: int = 0) -> tuple[int, list[
 
 def _compact(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _lines(parts: list[str]) -> str:
+    lines = [_compact(line) for line in "".join(parts).splitlines()]
+    return "\n".join(line for line in lines if line)
 
 
 WebFetcher = Callable[[str], WebPage]

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-skill-gather"
-version = "0.7.0"
-description = "Local CLI prototype for auditable topic research and video skill distillation."
+version = "1.0.0"
+description = "Local CLI prototype for auditable multi-source topic research and skill distillation."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["faster-whisper>=1.1,<2"]

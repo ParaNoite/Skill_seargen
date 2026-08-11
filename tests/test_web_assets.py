@@ -23,6 +23,12 @@ class WebAssetRegressionTests(unittest.TestCase):
         self.assertRegex(asset, re.compile(r"if \(!current \|\| !TOPIC_POLL_STATUSES\.has\(current\.status\)\) return;"))
         self.assertRegex(asset, re.compile(r"if \(topicPollState\.inFlight\) return;"))
 
+    def test_topic_detail_shows_budget_and_cache_guidance(self):
+        asset = _read_app_js()
+
+        self.assertIn("预算：候选", asset)
+        self.assertIn("缓存", asset)
+
 
 def _read_app_js() -> str:
     return (

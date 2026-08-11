@@ -2,7 +2,7 @@
 
 `skill_seargen`（search and generate）是一个本地 Python CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并建立主题研究任务的可恢复底座。
 
-当前版本推进到 v0.7。v0.2 的单视频可靠性与评测能力、v0.3 的主题任务底座、v0.4 的搜索和候选确认、v0.5 的网页知识总结、v0.6 的多视频主题处理保持不变。v0.7 让技术模式开始处理公开 GitHub 仓库来源：轻量分析 README、docs、examples、配置、入口和已有 skill 格式材料，并写入可复核的主题证据；跨来源结论融合仍留待后续版本。
+当前版本为 v1.0。它把 v0.2 至 v0.9 的可靠性、主题任务、搜索确认、来源处理、多来源融合、技术 skill 生成和人工复核能力收束为本地 Search + Generate 工作台；固定 10 主题离线回归集用于验证主题创建、候选搜索和审计契约。
 
 ## 项目文档
 
@@ -15,6 +15,8 @@
 - [docs/v0.5-closure.md](docs/v0.5-closure.md)：v0.5 网页知识总结结项与验收说明。
 - [docs/v0.6-closure.md](docs/v0.6-closure.md)：v0.6 多视频主题处理结项与验收说明。
 - [docs/v0.7-closure.md](docs/v0.7-closure.md)：v0.7 技术模式与 GitHub 来源结项与验收说明。
+- [docs/v0.8-closure.md](docs/v0.8-closure.md)：v0.8 多来源证据融合结项与验收说明。
+- [docs/v0.9-closure.md](docs/v0.9-closure.md)：v0.9 技术 skill 生成、评分、复核与重跑验收说明。
 - [docs/testing.md](docs/testing.md)：测试规范。
 
 ## 安装
@@ -82,6 +84,8 @@ $env:HF_HUB_DISABLE_XET="1"
 $env:HF_HOME="$PWD\.hf-cache"
 ```
 
+直接运行 CLI 时，如果这些变量没有显式设置，程序会自动使用上述镜像设置和项目根目录下的 `.hf-cache`；用户提供的环境变量始终优先。
+
 ## CLI 使用
 
 ```bash
@@ -93,6 +97,8 @@ skill-gather calibrate benchmarks/v0.2-labels.example.json
 skill-gather benchmark-report benchmarks/v0.2-videos.json --runs ./runs
 skill-gather vision-report runs/<full-run> runs/<sampled-run> --expected-fields benchmarks/v0.2-expected-fields.example.json
 skill-gather mvp-check --config configs/skill-gather.example.json
+skill-gather acceptance --dataset benchmarks/v1.0-topics.json --config configs/skill-gather.example.json --runs ./runs/v1.0-offline-acceptance
+skill-gather model-check --config config.json
 skill-gather topic create "Godot 导航" --mode technical --runs ./runs
 skill-gather topic search <topic-run-id> --config config.json --runs ./runs --fake
 skill-gather topic candidates <topic-run-id> --runs ./runs
@@ -100,6 +106,8 @@ skill-gather topic select <topic-run-id> <candidate-id> --runs ./runs
 skill-gather topic process <topic-run-id> --runs ./runs --config config.json --vision-mode sampled --vision-frame-limit 12
 skill-gather topic inspect <topic-run-id> --runs ./runs
 skill-gather topic resume <topic-run-id> --runs ./runs
+skill-gather topic rerun <topic-run-id> --runs ./runs --stage generating
+skill-gather topic review <topic-run-id> --runs ./runs --label needs_changes --notes "补充边界说明"
 ```
 
 也可以通过模块方式调用：
@@ -118,13 +126,16 @@ skill-gather topic resume <topic-run-id> --runs ./runs
 - `benchmark-report`：汇总冻结视频集的执行数、失败数、重试、退出码和模型审计覆盖。
 - `vision-report`：比较多个视觉实验 run 的远程调用数、耗时和人工定义字段正确率。
 - `mvp-check`：使用 fake clients 离线验证候选包与失败审计两条主分支。
+- `model-check`：以最小文本和视觉请求探测配置模型的真实可用性；`/models` 返回的目录只用于建议，不能证明模型可调用。
 - `topic create`：创建或恢复普通/技术模式的主题任务，并保存预算、缓存和主题包索引。
 - `topic search`：按模式调用搜索 provider，写入候选、查询审计和 `sources.json`；`--fake` 用于离线验证。
 - `topic candidates`：查看候选 ID、来源类型、质量分、风险和查询来源。
 - `topic select`：显式确认候选来源；v0.4 原子写入 `TopicTask.selected_sources` 与 `topic_package/sources.json`，状态进入 `processing_sources`，但不触发下载、抓取、ASR、视觉分析或生成。
-- `topic process`：处理已确认的网页、公开视频和技术模式 GitHub 来源；网页生成带引用的中文 `knowledge.md`，视频写入主题级时间线证据，GitHub 仓库写入轻量文件摘要和关键片段证据。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制；普通模式不会强行处理 GitHub。
+- `topic process`：处理已确认的网页、公开视频和技术模式 GitHub 来源，再统一生成 `topic_package/fusion.json` 与带结论级引用的中文 `knowledge.md`；技术模式额外生成 `SKILL.md` 和分维度 `score.json`。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制；普通模式不会强行处理 GitHub。
 - `topic inspect`：以 JSON 查看主题 run 的阶段、失败信息和将来产物路径。
 - `topic resume`：将失败的主题 run 恢复到失败前的阶段，并保留失败审计信息。
+- `topic rerun`：从 `processing_sources`、`generating` 或 `scoring` 阶段重跑，并将请求写入 `rerun_audit.json`。
+- `topic review`：记录技术主题 skill 的人工复核；人工结论不能补造证据，自动失败只能提升为 `needs_review`。
 
 失败 run 的 `video` 命令退出码为 `1`，参数或配置错误为 `2`。脚本和后续批处理不能只解析输出文本，应同时检查退出码和 JSON 中的 `status`。
 
@@ -191,6 +202,16 @@ http://127.0.0.1:8765
 ```
 
 Web 表单中的 API key 只会写入当前 Web 进程的环境变量，不会写回配置文件，也不会在响应里回显。
+
+## v1.0 离线验收
+
+固定验收集位于 `benchmarks/v1.0-topics.json`，包含普通教程、技术流程、中英文材料、视频、网页、GitHub、低质量来源、冲突和证据不足十类场景。运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m skill_gather acceptance --dataset benchmarks/v1.0-topics.json --config configs/skill-gather.example.json --runs .\runs\v1.0-offline-acceptance
+```
+
+该命令使用离线 fake 搜索，输出明确标记为 `synthetic`，仅验证主题 run、预算、候选和搜索审计契约；不代表真实网页、Bilibili、GitHub、ASR、视觉模型或 NewAPI 已通过。真实服务 smoke test 的操作见 `docs/v1.0-closure.md`。
 
 ## Judge 难度
 

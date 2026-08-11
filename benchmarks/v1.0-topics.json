@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "description": "skill_seargen v1.0 固定 10 主题验收集；离线回归验证流程契约，真实全量验收必须使用公开外部来源。",
+  "cases": [
+    {"case_id": "normal-zh-tutorial", "topic": "家庭咖啡手冲入门", "mode": "normal", "coverage": ["normal_tutorial", "chinese_material", "web_source", "video_source"], "expected_min_status": "passed"},
+    {"case_id": "normal-en-tutorial", "topic": "beginner sourdough starter maintenance", "mode": "normal", "coverage": ["normal_tutorial", "english_material", "web_source", "video_source"], "expected_min_status": "passed"},
+    {"case_id": "technical-godot", "topic": "Godot 4 NavigationAgent2D workflow", "mode": "technical", "coverage": ["technical_workflow", "english_material", "github_source", "video_source"], "expected_min_status": "needs_review"},
+    {"case_id": "technical-python", "topic": "Python CLI packaging with pyproject.toml", "mode": "technical", "coverage": ["technical_workflow", "english_material", "github_source", "web_source"], "expected_min_status": "needs_review"},
+    {"case_id": "normal-chinese-video", "topic": "零基础手机摄影构图", "mode": "normal", "coverage": ["normal_tutorial", "chinese_material", "video_source"], "expected_min_status": "passed"},
+    {"case_id": "technical-cache", "topic": "SQLite cache invalidation patterns", "mode": "technical", "coverage": ["technical_workflow", "github_source", "source_conflict"], "expected_min_status": "needs_review"},
+    {"case_id": "normal-conflict", "topic": "家用空气净化器滤芯更换周期", "mode": "normal", "coverage": ["web_source", "source_conflict"], "expected_min_status": "needs_review"},
+    {"case_id": "normal-low-quality", "topic": "无广告软件下载站推荐", "mode": "normal", "coverage": ["low_quality_source", "web_source"], "expected_min_status": "needs_review"},
+    {"case_id": "technical-insufficient", "topic": "不存在的私有框架内部部署流程", "mode": "technical", "coverage": ["technical_workflow", "insufficient_evidence"], "expected_min_status": "failed"},
+    {"case_id": "normal-inaccessible", "topic": "需要登录的付费课程完整内容", "mode": "normal", "coverage": ["insufficient_evidence", "low_quality_source"], "expected_min_status": "failed"}
+  ]
+}

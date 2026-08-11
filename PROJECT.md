@@ -20,7 +20,7 @@ B站公开视频 URL
 
 v0.2 保持单个 B 站公开视频边界，增加失败可识别、蒸馏可重试、模型响应可脱敏审计、评分可拆分校准，以及视觉成本实验入口。
 
-v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策略。v0.4 在此基础上接入 Fake、Bilibili、GitHub 和 SearXNG 搜索、确定性语义意图、可选 NewAPI 增强、候选确认和搜索审计。Bilibili 仅访问公开搜索入口，JSON 入口返回 412 时可回退解析公开搜索结果页；不使用 cookie、登录、浏览器自动化或验证码绕过。v0.5 处理普通模式中已确认的公开网页：提取正文、保存轻量快照和网页证据，并生成中文 `knowledge.md`。v0.6 将公开视频接入主题子 run，汇入视频时间线证据，隔离单视频失败并执行时长和模型调用预算。v0.7 处理技术模式中已确认的公开 GitHub 仓库：轻量提取 README、docs、examples、配置、入口和已有 skill 格式材料，写入 GitHub evidence 与 reference；跨来源结论融合仍留待后续版本。
+v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策略。v0.4 在此基础上接入 Fake、Bilibili、GitHub 和 SearXNG 搜索、确定性语义意图、可选 NewAPI 增强、候选确认和搜索审计。Bilibili 仅访问公开搜索入口，JSON 入口返回 412 时可回退解析公开搜索结果页；不使用 cookie、登录、浏览器自动化或验证码绕过。v0.5 处理普通模式中已确认的公开网页：提取正文、保存轻量快照和网页证据，并生成中文 `knowledge.md`。v0.6 将公开视频接入主题子 run，汇入视频时间线证据，隔离单视频失败并执行时长和模型调用预算。v0.7 处理技术模式中已确认的公开 GitHub 仓库：轻量提取 README、docs、examples、配置、入口和已有 skill 格式材料，写入 GitHub evidence 与 reference。v0.8 对网页、视频和 GitHub 证据执行保守融合，保留结论级引用、冲突、缺口、低置信和来源可信度信息。v0.9 从融合证据生成技术 `SKILL.md`，写入分维度评分，支持人工复核和生成/评分阶段重跑。
 
 ## 2. 目录职责
 
@@ -45,6 +45,8 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 | CLI | `src/skill_gather/cli.py` | 命令入口、参数解析、面向用户的错误语义 |
 | 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、评分结果 |
 | 主题任务 | `src/skill_gather/topics.py` | 主题 run 的持久化、状态推进、预算用量、失败审计与恢复 |
+| 主题证据融合 | `src/skill_gather/pipeline/topic_fusion.py` | 网页、视频和 GitHub 证据的结论级融合、冲突与缺口记录 |
+| 技术主题生成 | `src/skill_gather/distillers/technical_skill.py` | 技术主题 `SKILL.md`、references、分维度评分与人工复核 |
 | 来源适配 | `src/skill_gather/adapters/` | B站、未来 YouTube 等平台适配 |
 | 外部集成 | `src/skill_gather/integrations/` | `yt-dlp`、`ffmpeg`、newapi 等工具/API 的薄包装 |
 | 管线编排 | `src/skill_gather/pipeline/` | 阶段调度、断点续跑、失败审计 |
@@ -92,7 +94,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 - `TopicTask`
 - `TopicPackage`
 
-主题任务通过 `TopicTask` 交接主题、模式、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据、文本快照和 `knowledge.md`；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。v0.7 写入 GitHub 轻量结构化证据、reference 摘要和 `github_processing_audit.json`。`SKILL.md` 与跨来源融合仍由后续阶段写入。
+主题任务通过 `TopicTask` 交接主题、模式、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据和文本快照；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。v0.7 写入 GitHub 轻量结构化证据、reference 摘要和 `github_processing_audit.json`。v0.8 统一读取主题 evidence，写入 `fusion.json` 和 `knowledge.md`。v0.9 技术模式额外写入 `SKILL.md`、`score.json` 和人工复核记录。
 
 所有 manifest 和运行记录必须使用仓库相对路径或用户显式配置的输出路径，不得写入凭据、cookie 或临时下载 URL。
 

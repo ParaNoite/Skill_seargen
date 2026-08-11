@@ -109,6 +109,13 @@ function renderTopic(topic) {
   const selectedSources = topic.selected_sources || [];
   const videoRuns = topic.video_runs || [];
   const job = topic.job || {};
+  const fusion = topic.fusion || {};
+  const fusionConclusions = fusion.conclusions || [];
+  const fusionConflicts = fusion.conflicts || [];
+  const fusionGaps = fusion.evidence_gaps || [];
+  const budget = topic.budget || {};
+  const cache = topic.cache || {};
+  const budgetSummary = `<span class="muted">预算：候选 ${Number(budget.max_candidates) || 0} · 处理来源 ${Number(budget.max_selected_sources) || 0} · 最长 ${Number(budget.max_runtime_sec) || 0} 秒 · 缓存 ${cache.reuse_cache ? "复用" : "关闭"}</span>`;
   const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
   const selectButton = topic.status === "awaiting_selection" && candidates.length ? '<button id="topic-select-button" class="button primary" type="button">确认选择</button>' : "";
   const retryButton = topic.status === "failed" ? '<button id="topic-retry-button" class="button secondary" type="button">恢复后重试</button>' : "";
@@ -129,12 +136,14 @@ function renderTopic(topic) {
     <section class="topic-confirmation topic-outcome" aria-live="polite">
       <div><strong>${topic.status === "completed" ? "主题处理完成" : "主题处理失败"}</strong><span>${escapeHtml(topic.status === "failed" ? (topic.failure_reason || job.error || "请查看处理审计文件。") : "处理产物已生成，请查看下方审计文件。")}</span></div>
       ${topic.artifacts?.knowledge ? `<span class="status completed">知识总结：${escapeHtml(topic.artifacts.knowledge)}</span>` : ""}
+      ${topic.artifacts?.fusion ? `<span class="status completed">融合证据：${escapeHtml(topic.artifacts.fusion)}</span>` : ""}
       ${topic.artifacts?.video_processing_audit ? `<span class="status completed">视频审计：${escapeHtml(topic.artifacts.video_processing_audit)}</span>` : ""}
       ${topic.artifacts?.github_processing_audit ? `<span class="status completed">GitHub 审计：${escapeHtml(topic.artifacts.github_processing_audit)}</span>` : ""}
+      ${topic.artifacts?.fusion ? `<div class="topic-video-runs"><strong>证据融合</strong><span>${fusionConclusions.length} 条结论 · ${fusionConflicts.length} 条冲突 · ${fusionGaps.length} 个缺口</span>${fusionConflicts.map(item => `<span>待复核：${escapeHtml(item.summary || "来源结论冲突")}</span>`).join("")}</div>` : ""}
       ${videoRunSummary}
     </section>` : "";
   topicDetail.innerHTML = `
-    <div class="topic-actions">${searchButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)}</span></div>
+    <div class="topic-actions">${searchButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)}</span>${budgetSummary}</div>
     ${confirmation}
     ${outcome}
     ${candidates.length ? `<div class="candidate-list">${candidates.map(candidate => `

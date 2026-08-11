@@ -401,6 +401,50 @@ class NewApiClient:
             ) from exc
         return str(content)
 
+    def probe_model(self, model: str, capability: str) -> dict[str, Any]:
+        """Verify a configured chat model with a minimal request without retaining its output."""
+        expected_content = "1"
+        if capability == "text":
+            content: str | list[dict[str, Any]] = "Reply with only the digit 1."
+        elif capability == "vision":
+            expected_content = "red"
+            content = [
+                {"type": "text", "text": "Identify the image's dominant color. Reply with only its CSS color name."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY/jPwPAfAAUAAf+mXJtdAAAAAElFTkSuQmCC"},
+                },
+            ]
+        else:
+            raise ValueError("capability must be text or vision")
+
+        try:
+            response = self._post_chat_completion_content(
+                {"model": model, "messages": [{"role": "user", "content": content}], "max_tokens": 1},
+                operation="model_probe",
+                http_error_code="model_probe_failed",
+                unreachable_code="model_probe_unreachable",
+            )
+        except NewApiError as exc:
+            summary = f"{exc.code}"
+            if exc.status_code is not None:
+                summary += f" (HTTP {exc.status_code})"
+            return {
+                "model": model,
+                "capability": capability,
+                "available": False,
+                "error_code": exc.code,
+                "status_code": exc.status_code,
+                "summary": summary,
+            }
+        matched = response.strip().strip("`'\" ").rstrip(".。!！").lower() == expected_content
+        return {
+            "model": model,
+            "capability": capability,
+            "available": matched,
+            **({"summary": "model_probe_unexpected_response"} if not matched else {}),
+        }
+
     def analyze_frame(self, frame_file: str | Path, model: str) -> dict[str, Any]:
         path = Path(frame_file)
         if not path.exists():
