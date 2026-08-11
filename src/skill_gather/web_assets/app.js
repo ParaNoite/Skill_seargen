@@ -8,9 +8,9 @@ const difficultyNames = { lenient: "宽松", standard: "标准", strict: "严格
 const RUN_POLL_STATUSES = new Set(["created", "running"]);
 const TOPIC_POLL_STATUSES = new Set(["awaiting_plan_confirmation", "processing_sources", "generating", "scoring"]);
 
-const state = { runs: [], selectedId: null, timer: null };
+const state = { runs: [], selectedId: null, selectedDetailVersion: null, timer: null };
 const runPollState = { inFlight: false };
-const topicState = { topics: [], selectedId: null };
+const topicState = { topics: [], selectedId: null, selectedDetailVersion: null };
 const topicPollState = { inFlight: false };
 let visibleResults = [];
 const viewPanels = { operations: document.querySelector("#operations-view"), results: document.querySelector("#results-view") };
@@ -130,8 +130,10 @@ function renderEmptyDetail() {
 async function loadTopics(selectFirst = false) {
   if (!topicsList) return;
   try {
-    topicState.topics = (await request("/api/topics")).topics || [];
-    renderTopics();
+    const nextTopics = (await request("/api/topics")).topics || [];
+    const changed = JSON.stringify(nextTopics) !== JSON.stringify(topicState.topics);
+    topicState.topics = nextTopics;
+    if (changed) renderTopics();
     if (topicState.topics.length && (selectFirst || !topicState.selectedId)) {
       selectTopic(topicState.topics[0].run_id);
     } else if (!topicState.topics.length) {
@@ -159,9 +161,15 @@ function renderTopics() {
 
 async function selectTopic(runId) {
   topicState.selectedId = runId;
+  topicState.selectedDetailVersion = null;
   renderTopics();
   topicDetail.innerHTML = '<div class="loading compact">正在读取主题...</div>';
-  try { renderTopic(await request(`/api/topics/${encodeURIComponent(runId)}`)); }
+  try {
+    const topic = await request(`/api/topics/${encodeURIComponent(runId)}`);
+    if (topicState.selectedId !== runId) return;
+    topicState.selectedDetailVersion = topic.updated_at || "";
+    renderTopic(topic);
+  }
   catch (error) { topicDetail.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
 }
 
@@ -306,10 +314,12 @@ function renderModels(payload) {
 }
 
 async function loadRuns(selectFirst = false) {
-  runsList.innerHTML = '<div class="loading">正在读取处理记录...</div>';
+  if (!state.runs.length) runsList.innerHTML = '<div class="loading">正在读取处理记录...</div>';
   try {
-    state.runs = (await request("/api/runs")).runs;
-    renderRuns();
+    const nextRuns = (await request("/api/runs")).runs || [];
+    const changed = JSON.stringify(nextRuns) !== JSON.stringify(state.runs);
+    state.runs = nextRuns;
+    if (changed) renderRuns();
     if (state.runs.length && (selectFirst || !state.selectedId)) {
       selectRun(state.runs[0].run_id);
     } else if (!state.runs.length) {
@@ -338,10 +348,14 @@ function renderRuns() {
 
 async function selectRun(runId) {
   state.selectedId = runId;
+  state.selectedDetailVersion = null;
   renderRuns();
   detailPanel.innerHTML = '<div class="loading">正在读取详情...</div>';
   try {
-    renderDetail(await request(`/api/runs/${encodeURIComponent(runId)}`));
+    const run = await request(`/api/runs/${encodeURIComponent(runId)}`);
+    if (state.selectedId !== runId) return;
+    state.selectedDetailVersion = run.updated_at || "";
+    renderDetail(run);
   } catch (error) {
     detailPanel.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`;
   }
@@ -523,7 +537,14 @@ async function poll() {
   try {
     await loadRuns();
     const latest = state.runs.find(run => run.run_id === state.selectedId);
-    if (latest) await selectRun(state.selectedId);
+    if (latest && (latest.updated_at || "") !== state.selectedDetailVersion) {
+      const runId = state.selectedId;
+      const run = await request(`/api/runs/${encodeURIComponent(runId)}`);
+      if (state.selectedId === runId) {
+        state.selectedDetailVersion = run.updated_at || "";
+        renderDetail(run);
+      }
+    }
   } finally {
     runPollState.inFlight = false;
   }
@@ -539,7 +560,14 @@ async function pollTopics() {
   try {
     await loadTopics();
     const latest = topicState.topics.find(topic => topic.run_id === topicState.selectedId);
-    if (latest) await selectTopic(topicState.selectedId);
+    if (latest && (latest.updated_at || "") !== topicState.selectedDetailVersion) {
+      const runId = topicState.selectedId;
+      const topic = await request(`/api/topics/${encodeURIComponent(runId)}`);
+      if (topicState.selectedId === runId) {
+        topicState.selectedDetailVersion = topic.updated_at || "";
+        renderTopic(topic);
+      }
+    }
   } finally {
     topicPollState.inFlight = false;
   }

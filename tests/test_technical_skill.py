@@ -125,6 +125,37 @@ class TechnicalSkillTests(unittest.TestCase):
 
             self.assertEqual(score["dimensions"]["evidence"], 60)
 
+    def test_topic_terms_in_citation_titles_keep_subject_implicit_claims(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume(
+                "Godot NavigationAgent2D examples repository",
+                mode="technical",
+            )
+            root = store.run_path(task.run_id)
+            fusion = {
+                "conclusions": [
+                    {
+                        "claim": "设置 target_position 后，必须在每个物理帧调用 get_next_path_position 更新内部路径。",
+                        "citations": [
+                            {
+                                "source_id": "S1",
+                                "title": "NavigationAgent2D - Godot Engine documentation",
+                                "url": "https://docs.godotengine.org/classes/class_navigationagent2d.html",
+                            }
+                        ],
+                    }
+                ],
+                "conflicts": [],
+                "evidence_gaps": [],
+                "risk_flags": [],
+            }
+
+            skill_path, _score_path, score = generate_technical_skill(task, root, fusion)
+
+            self.assertEqual(score["evidence_count"], 1)
+            self.assertIn("get_next_path_position", skill_path.read_text(encoding="utf-8"))
+
     def test_rejects_headings_prose_and_api_signatures_as_workflow_steps(self):
         self.assertFalse(_is_procedural_claim("Agent-to-Agent Avoidance (RVO)"))
         self.assertFalse(_is_procedural_claim("A loading screen scene (e.g., with a spinner animation)."))

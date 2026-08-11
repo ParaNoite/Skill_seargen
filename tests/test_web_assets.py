@@ -33,6 +33,18 @@ class WebAssetRegressionTests(unittest.TestCase):
         self.assertRegex(asset, re.compile(r"if \(!current \|\| !TOPIC_POLL_STATUSES\.has\(current\.status\)\) return;"))
         self.assertRegex(asset, re.compile(r"if \(topicPollState\.inFlight\) return;"))
 
+    def test_polling_does_not_replace_selected_details_with_loading_state(self):
+        asset = _read_app_js()
+        video_poll = re.search(r"async function poll\(\) \{(?P<body>[\s\S]*?)\n\}", asset)
+        topic_poll = re.search(r"async function pollTopics\(\) \{(?P<body>[\s\S]*?)\n\}", asset)
+
+        self.assertIsNotNone(video_poll)
+        self.assertIsNotNone(topic_poll)
+        self.assertNotIn("selectRun(", video_poll.group("body"))
+        self.assertNotIn("selectTopic(", topic_poll.group("body"))
+        self.assertIn("selectedDetailVersion", video_poll.group("body"))
+        self.assertIn("selectedDetailVersion", topic_poll.group("body"))
+
     def test_topic_detail_shows_budget_and_cache_guidance(self):
         asset = _read_app_js()
 

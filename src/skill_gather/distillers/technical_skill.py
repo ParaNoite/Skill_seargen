@@ -235,8 +235,17 @@ def _relevant_conclusions(topic: str, conclusions: list[dict[str, Any]]) -> list
         if _useful_claim(str(item.get("claim", "")))
         and _dimension_matches(topic, str(item.get("claim", "")))
         and _version_matches(topic, str(item.get("claim", "")))
-        and any(term in str(item.get("claim", "")).lower() for term in terms)
+        and any(term in _conclusion_search_text(item) for term in terms)
     ]
+
+
+def _conclusion_search_text(item: dict[str, Any]) -> str:
+    values = [str(item.get("claim", ""))]
+    for citation in item.get("citations", []):
+        if not isinstance(citation, dict):
+            continue
+        values.extend(str(citation.get(key, "")) for key in ("title", "url", "claim"))
+    return " ".join(values).lower()
 
 
 def _procedural_conclusions(conclusions: list[dict[str, Any]]) -> list[dict[str, Any]]:
