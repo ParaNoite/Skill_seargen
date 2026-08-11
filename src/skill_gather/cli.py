@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .adapters.bilibili import build_initial_manifest
-from .automation import evaluate_release_gate
+from .automation import persist_release_gate
 from .acceptance import run_offline_acceptance
 from .config import ConfigError, load_config
 from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
@@ -652,18 +652,10 @@ def _complete_topic_generation(store: TopicRunStore, task: Any, run_root: Path, 
             score_path, score = rescore_technical_package(task, run_root, fusion)
         task.package.score = score_path.relative_to(run_root).as_posix()
         task.artifacts.update({"skill": task.package.skill or "", "score": task.package.score})
-        gate = evaluate_release_gate(task, fusion, score)
-        write_json(run_root / "release_gate.json", gate.to_dict())
-        task.artifacts["release_gate"] = "release_gate.json"
-        if task.execution_mode == "auto" and gate.status != "passed" and score.get("final_status") == "passed":
-            score["final_status"] = "needs_review"
-            score["release_gate_reasons"] = list(gate.reasons)
-            write_json(score_path, score)
+        persist_release_gate(task, run_root, fusion, score)
         store.save(task)
     elif task.execution_mode == "auto":
-        gate = evaluate_release_gate(task, fusion, {})
-        write_json(run_root / "release_gate.json", gate.to_dict())
-        task.artifacts["release_gate"] = "release_gate.json"
+        persist_release_gate(task, run_root, fusion, {})
         store.save(task)
     if task.status == "generating":
         task = store.advance(task.run_id, "scoring")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from .models import (
     TOPIC_RUN_STATUSES,
@@ -94,9 +95,9 @@ class TopicRunStore:
         self.save(task)
         return task
 
-    def create_plan(self, run_id: str, *, warning: str = "") -> TopicTask:
+    def create_plan(self, run_id: str, *, plan: Any | None = None, warning: str = "") -> TopicTask:
         task = self.load(run_id)
-        task.plan = build_deterministic_plan(task, warning=warning)
+        task.plan = plan or build_deterministic_plan(task, warning=warning)
         task.plan_audit.append({"event": "plan_generated", "method": task.plan.generation_method, "ambiguous": task.plan.ambiguous})
         if task.plan.ambiguous:
             task.status = "awaiting_plan_confirmation"
@@ -123,10 +124,15 @@ class TopicRunStore:
         if task.plan is None:
             task.plan = build_deterministic_plan(task, warning="plan_interrupted")
         task.plan.warning = "plan_interrupted"
-        task.plan.audit_status = "needs_confirmation"
         task.plan_audit.append({"event": "plan_interrupted", "reason": reason})
-        task.status = "awaiting_plan_confirmation"
-        task.current_stage = "awaiting_plan_confirmation"
+        if task.execution_mode == "auto":
+            task.plan = apply_plan(task, task.plan, task.plan.recommended_option_id)
+            task.status = "created"
+            task.current_stage = "created"
+        else:
+            task.plan.audit_status = "needs_confirmation"
+            task.status = "awaiting_plan_confirmation"
+            task.current_stage = "awaiting_plan_confirmation"
         self.save(task)
         return task
 

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 
 from .models import SemanticPlan, SemanticPlanOption, TopicTask
+from .integrations.newapi import NewApiClient, NewApiError
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,24 @@ def build_deterministic_plan(task: TopicTask, *, warning: str = "") -> SemanticP
         audit_status="needs_confirmation" if assessment.ambiguous else "not_required",
         warning=warning,
     )
+
+
+def build_semantic_plan(task: TopicTask, client: NewApiClient | None, model: str) -> SemanticPlan:
+    if client is None:
+        return build_deterministic_plan(task, warning="skipped_missing_api_key")
+    try:
+        intent = client.build_search_intent(task.topic, task.mode, model)
+    except NewApiError as exc:
+        return build_deterministic_plan(task, warning=f"fallback:{exc.code}")
+    plan = build_deterministic_plan(task)
+    focused = plan.options[0]
+    focused.goal = str(intent.get("goal", "")).strip() or focused.goal
+    focused.facets = list(dict.fromkeys([str(item) for item in intent.get("facets", [])] + focused.facets))[:6]
+    focused.exclusions = list(dict.fromkeys([str(item) for item in intent.get("exclusions", [])] + focused.exclusions))[:6]
+    focused.queries = list(dict.fromkeys([str(item) for item in intent.get("queries", [])] + focused.queries))[:6]
+    focused.rationale = "NewAPI 结构化理解与保守规则方案共同生成；未保存原始模型响应。"
+    plan.generation_method = "newapi"
+    return plan
 
 
 def apply_plan(task: TopicTask, plan: SemanticPlan, option_id: str, *, edited: dict[str, object] | None = None) -> SemanticPlan:

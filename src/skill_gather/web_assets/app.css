@@ -68,6 +68,8 @@ button { cursor: pointer; }
 .nav-tab.active { border-bottom-color: var(--green); color: var(--green-dark); }
 .view-panel { margin-bottom: 18px; padding: 24px 28px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .view-panel .detail-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.result-filters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.result-filters input, .result-filters select { width: 128px; }
 .local-status { color: var(--muted); font-size: 13px; }
 .local-status i {
   display: inline-block;

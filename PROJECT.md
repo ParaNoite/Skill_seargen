@@ -96,7 +96,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 - `TopicTask`
 - `TopicPackage`
 
-主题任务通过 `TopicTask` 交接主题、模式、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据和文本快照；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。v0.7 写入 GitHub 轻量结构化证据、reference 摘要和 `github_processing_audit.json`。v0.8 统一读取主题 evidence，写入 `fusion.json` 和 `knowledge.md`。v0.9 技术模式额外写入 `SKILL.md`、`score.json` 和人工复核记录。
+主题任务通过 `TopicTask` 交接主题、模式、执行模式、语义计划及审计、暂停来源、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据和文本快照；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。v0.7 写入 GitHub 轻量结构化证据、reference 摘要和 `github_processing_audit.json`。v0.8 统一读取主题 evidence，写入 `fusion.json` 和 `knowledge.md`。v0.9 技术模式额外写入 `SKILL.md`、`score.json` 和人工复核记录；v1.1 额外写入结构化语义计划、自动选源审计和 `release_gate.json`。
 
 所有 manifest 和运行记录必须使用仓库相对路径或用户显式配置的输出路径，不得写入凭据、cookie 或临时下载 URL。
 

@@ -17,11 +17,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .cli import handle_topic_process, handle_video
 from .automation import choose_auto_sources
 from .config import load_config
-from .integrations.newapi import resolve_api_key
+from .integrations.newapi import NewApiClient, resolve_api_key
 from .models import PIPELINE_STAGES
-from .planning import assess_ambiguity
+from .planning import assess_ambiguity, build_semantic_plan
 from .mvp_check import run_mvp_check
-from .runs import RunStore, read_json, safe_slug
+from .runs import RunStore, read_json, safe_slug, write_json
 from .search import search_topic as execute_topic_search
 from .source import infer_source
 from .scoring import normalize_judge_difficulty
@@ -102,7 +102,8 @@ class WebApp:
         )
         assessment = assess_ambiguity(topic, mode)
         if assessment.ambiguous and task.plan is None:
-            task = self.topic_store.create_plan(task.run_id)
+            plan = build_semantic_plan(task, NewApiClient.from_config(config.newapi), config.newapi.distiller_model)
+            task = self.topic_store.create_plan(task.run_id, plan=plan)
             if execution_mode == "auto" and task.plan:
                 task = self.topic_store.confirm_plan(task.run_id, task.plan.recommended_option_id)
         elif not assessment.ambiguous:
@@ -164,27 +165,32 @@ class WebApp:
         for item in items:
             status = str(item.get("status", "unknown"))
             counts[status] = counts.get(status, 0) + 1
-        return {"total": len(items), "by_status": counts, "active_jobs": sum(1 for job in [*self._jobs.values(), *self._topic_jobs.values()] if job.get("active"))}
+        model_availability = "unconfigured"
+        try:
+            config = load_config(self.config_path)
+            model_availability = "configured_unverified" if resolve_api_key(config.newapi.api_key_env) else "missing_api_key"
+        except (OSError, ValueError):
+            pass
+        return {"total": len(items), "by_status": counts, "active_jobs": sum(1 for job in [*self._jobs.values(), *self._topic_jobs.values()] if job.get("active")), "model_availability": model_availability}
 
-    def results(self, *, result_type: str = "all", status: str = "all", min_score: int = 0, risk: str = "") -> list[dict[str, Any]]:
+    def results(self, *, result_type: str = "all", status: str = "all", min_score: int = 0, risk: str = "", source: str = "") -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         if result_type in {"all", "video"}:
             for item in self.list_runs():
                 if item.get("status") not in {"completed", "failed"}:
                     continue
-                if status != "all" and item.get("status") != status:
-                    continue
                 detail = self.get_run(item["run_id"])
                 score = int(detail.get("score", {}).get("final_score", 0) or 0)
+                result_status = str(detail.get("score", {}).get("final_status", "failed"))
                 risks = detail.get("risk_flags", [])
-                if score < min_score or (risk and risk not in risks):
+                if (status != "all" and result_status != status) or score < min_score or (risk and risk not in risks):
                     continue
-                results.append({**item, "kind": "video", "score": score, "risk_flags": risks})
+                if source and source not in {detail.get("manifest", {}).get("source", ""), detail.get("manifest", {}).get("author", "")}:
+                    continue
+                results.append({**item, "kind": "video", "score": score, "result_status": result_status, "risk_flags": risks})
         if result_type in {"all", "topic", "skill"}:
             for item in self.list_topics():
                 if item.get("status") not in {"completed", "failed"}:
-                    continue
-                if status != "all" and item.get("status") != status:
                     continue
                 detail = self.get_topic(item["run_id"])
                 score_payload: dict[str, Any] = {}
@@ -192,10 +198,12 @@ class WebApp:
                 if score_path:
                     score_payload = self._optional_json(self.topic_store.run_path(item["run_id"]) / score_path)
                 score = int(score_payload.get("final_score", 0) or 0)
+                result_status = str(score_payload.get("final_status", "needs_review" if item.get("status") == "completed" else "failed"))
                 risks = detail.get("fusion", {}).get("risk_flags", []) if isinstance(detail.get("fusion"), dict) else []
-                if score < min_score or (risk and risk not in risks):
+                selected_hosts = {candidate.get("host", "") for candidate in detail.get("selected_sources", [])}
+                if (status != "all" and result_status != status) or score < min_score or (risk and risk not in risks) or (source and source not in selected_hosts):
                     continue
-                results.append({**item, "kind": "topic", "score": score, "risk_flags": risks})
+                results.append({**item, "kind": "topic", "score": score, "result_status": result_status, "risk_flags": risks, "artifacts": detail.get("artifacts", {})})
         return results
 
     def search_topic(self, run_id: str, *, use_fake: bool = False, config_path: str | None = None) -> dict[str, Any]:
@@ -326,17 +334,20 @@ class WebApp:
             "judge_difficulty": score.get("judge_difficulty") or state.get("judge_difficulty", "standard"),
         }
 
-    def start_video(self, url: str, api_key: str = "", judge_difficulty: str = "standard") -> dict[str, Any]:
+    def start_video(self, url: str, api_key: str = "", judge_difficulty: str = "standard", execution_mode: str = "manual") -> dict[str, Any]:
         url = url.strip()
         if not url:
             raise ValueError("请输入 B 站公开视频 URL")
 
         judge_difficulty = normalize_judge_difficulty(judge_difficulty)
+        if execution_mode not in {"manual", "auto"}:
+            raise ValueError("执行模式必须是 manual 或 auto")
         config = load_config(self.config_path)
         self._apply_api_key(config.newapi.api_key_env, api_key)
         source = infer_source(url)
         state = self.store.start_or_resume(source.source, source.source_id)
         state.judge_difficulty = judge_difficulty
+        state.execution_mode = execution_mode
         self.store.save(state)
         with self._lock:
             current = self._jobs.get(state.run_id)
@@ -346,7 +357,7 @@ class WebApp:
 
         thread = threading.Thread(
             target=self._run_video,
-            args=(state.run_id, url, judge_difficulty),
+            args=(state.run_id, url, judge_difficulty, execution_mode),
             name=f"skill-gather-{state.run_id}",
             daemon=True,
         )
@@ -404,7 +415,7 @@ class WebApp:
         if api_key:
             os.environ[str(env_name)] = api_key
 
-    def _run_video(self, run_id: str, url: str, judge_difficulty: str) -> None:
+    def _run_video(self, run_id: str, url: str, judge_difficulty: str, execution_mode: str = "manual") -> None:
         with self._lock:
             self._jobs[run_id]["status"] = "running"
 
@@ -420,6 +431,14 @@ class WebApp:
         try:
             exit_code = handle_video(args, stdout, stderr)
             error = stderr.getvalue().strip()
+            if exit_code == 0 and execution_mode == "auto":
+                score_path = self.store.run_path(run_id) / "score.json"
+                score = self._optional_json(score_path)
+                if score.get("final_status") == "passed":
+                    score["final_status"] = "needs_review"
+                    score["release_gate_reasons"] = ["单视频缺少交叉证据"]
+                    write_json(score_path, score)
+                write_json(self.store.run_path(run_id) / "release_gate.json", {"status": "needs_review", "reasons": ["单视频缺少交叉证据"]})
             if exit_code != 0 and not error:
                 error = "处理未成功完成"
         except Exception as exc:  # Preserve the error for the local status UI.
@@ -521,6 +540,7 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     status=query.get("status", ["all"])[0],
                     min_score=int(query.get("min_score", ["0"])[0]),
                     risk=query.get("risk", [""])[0],
+                    source=query.get("source", [""])[0],
                 )})
                 return
             if path == "/api/runs":
@@ -590,6 +610,7 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                         str(body.get("url", "")),
                         str(body.get("api_key", "")),
                         str(body.get("judge_difficulty", "standard")),
+                        str(body.get("execution_mode", "manual")),
                     )
                     self._send_json(result, HTTPStatus.ACCEPTED)
                     return

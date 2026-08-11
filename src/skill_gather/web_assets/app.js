@@ -12,6 +12,7 @@ const state = { runs: [], selectedId: null, timer: null };
 const runPollState = { inFlight: false };
 const topicState = { topics: [], selectedId: null };
 const topicPollState = { inFlight: false };
+let visibleResults = [];
 const viewPanels = { operations: document.querySelector("#operations-view"), results: document.querySelector("#results-view") };
 const runsList = document.querySelector("#runs-list");
 const detailPanel = document.querySelector("#detail-panel");
@@ -39,11 +40,14 @@ function setView(view) {
 
 async function loadMetrics() {
   const grid = document.querySelector("#metrics-grid");
+  const queue = document.querySelector("#operations-list");
   if (!grid) return;
   try {
-    const data = await request("/api/metrics");
+    const [data, work] = await Promise.all([request("/api/metrics"), request("/api/work-items")]);
     const statuses = Object.entries(data.by_status || {}).map(([key, value]) => `<div class="metric"><div class="metric-label">${escapeHtml(key)}</div><div class="metric-value">${Number(value) || 0}</div></div>`).join("");
-    grid.innerHTML = `<div class="metric"><div class="metric-label">任务总数</div><div class="metric-value">${Number(data.total) || 0}</div></div><div class="metric"><div class="metric-label">活动作业</div><div class="metric-value">${Number(data.active_jobs) || 0}</div></div>${statuses}`;
+    grid.innerHTML = `<div class="metric"><div class="metric-label">任务总数</div><div class="metric-value">${Number(data.total) || 0}</div></div><div class="metric"><div class="metric-label">活动作业</div><div class="metric-value">${Number(data.active_jobs) || 0}</div></div><div class="metric"><div class="metric-label">模型可用性</div><div class="metric-value small">${escapeHtml(data.model_availability || "unknown")}</div></div>${statuses}`;
+    queue.innerHTML = (work.items || []).map(item => { const elapsed = item.usage?.elapsed_runtime_sec || 0; const maxRuntime = item.budget?.max_runtime_sec || 0; const action = item.kind === "topic" && !["completed", "failed", "paused"].includes(item.status) ? `<button class="button secondary" data-operation="pause" data-id="${escapeHtml(item.run_id)}">暂停</button>` : item.kind === "topic" && ["failed", "paused"].includes(item.status) ? `<button class="button secondary" data-operation="retry" data-id="${escapeHtml(item.run_id)}">重试</button>` : ""; return `<div class="run-item"><div class="run-top"><span class="run-meta">${escapeHtml(item.kind)} · ${escapeHtml(item.current_stage || item.status)}</span>${statusBadge(item.status)}</div><div class="run-title">${escapeHtml(item.topic || item.title || item.run_id)}</div><div class="run-meta">耗时 ${elapsed}s / ${maxRuntime || "-"}s${item.failure_reason ? ` · ${escapeHtml(item.failure_reason)}` : ""}</div>${action}</div>`; }).join("") || '<div class="loading">暂无任务。</div>';
+    queue.querySelectorAll("[data-operation]").forEach(button => button.addEventListener("click", async () => { await request(`/api/topics/${encodeURIComponent(button.dataset.id)}/${button.dataset.operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await loadMetrics(); }));
   } catch (error) { grid.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
 }
 
@@ -52,15 +56,26 @@ async function loadResults() {
   if (!target) return;
   target.innerHTML = '<div class="loading">正在加载结果...</div>';
   try {
-    const status = document.querySelector("#results-status")?.value || "all";
-    const data = await request(`/api/results?status=${encodeURIComponent(status)}`);
-    target.innerHTML = data.results?.length ? data.results.map(item => `<div class="run-item"><div class="run-top"><span class="run-meta">${escapeHtml(item.kind)}</span>${statusBadge(item.status)}</div><div class="run-title">${escapeHtml(item.title || item.topic || item.run_id)}</div><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div></div>`).join("") : '<div class="loading">暂无匹配结果。</div>';
+    const params = new URLSearchParams({ type: document.querySelector("#results-type")?.value || "all", status: document.querySelector("#results-status")?.value || "all", min_score: document.querySelector("#results-score")?.value || "0", risk: document.querySelector("#results-risk")?.value || "", source: document.querySelector("#results-source")?.value || "" });
+    const data = await request(`/api/results?${params}`);
+    visibleResults = data.results || [];
+    target.innerHTML = visibleResults.length ? visibleResults.map(item => `<label class="run-item"><div class="run-top"><span><input type="checkbox" data-result-id="${escapeHtml(item.run_id)}"> <span class="run-meta">${escapeHtml(item.kind)}</span></span>${statusBadge(item.result_status)}</div><div class="run-title">${escapeHtml(item.title || item.topic || item.run_id)}</div><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div><div class="run-meta">${escapeHtml(Object.values(item.artifacts || {}).filter(Boolean).join(" · "))}</div></label>`).join("") : '<div class="loading">暂无匹配结果。</div>';
   } catch (error) { target.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
 }
 
 document.querySelectorAll(".nav-tab").forEach(tab => tab.addEventListener("click", () => setView(tab.dataset.view)));
 document.querySelector("#metrics-refresh")?.addEventListener("click", loadMetrics);
-document.querySelector("#results-status")?.addEventListener("change", loadResults);
+["#results-type", "#results-status", "#results-score", "#results-risk", "#results-source"].forEach(selector => document.querySelector(selector)?.addEventListener("change", loadResults));
+document.querySelector("#results-export")?.addEventListener("click", () => {
+  const selected = new Set([...document.querySelectorAll("[data-result-id]:checked")].map(item => item.dataset.resultId));
+  const payload = visibleResults.filter(item => selected.has(item.run_id));
+  if (!payload.length) return showToast("请先选择要导出的结果");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+  link.download = "skill-seargen-results.json";
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
 
 function displayVisionReason(reason) {
   if (reason === "newapi API key is not configured") return "未配置 NewAPI API key";
@@ -178,7 +193,8 @@ function renderTopic(topic) {
       ${topic.artifacts?.fusion ? `<div class="topic-video-runs"><strong>证据融合</strong><span>${fusionConclusions.length} 条结论 · ${fusionConflicts.length} 条冲突 · ${fusionGaps.length} 个缺口</span>${fusionConflicts.map(item => `<span>待复核：${escapeHtml(item.summary || "来源结论冲突")}</span>`).join("")}</div>` : ""}
       ${videoRunSummary}
     </section>` : "";
-  const planPanel = topic.status === "awaiting_plan_confirmation" && plan ? `<section class="topic-confirmation"><div><strong>确认研究语义</strong><span>${escapeHtml((plan.ambiguity_reasons || []).join("；"))}</span></div><div class="candidate-list">${(plan.options || []).map(option => `<button class="candidate-card" type="button" data-plan-option="${escapeHtml(option.option_id)}"><span><span class="candidate-title">${escapeHtml(option.label)}</span><span class="candidate-summary">${escapeHtml(option.goal)}</span><span class="candidate-meta">${escapeHtml((option.facets || []).join(" · "))}</span></span>${option.option_id === plan.recommended_option_id ? '<span class="status completed">推荐</span>' : ""}</button>`).join("")}</div></section>` : "";
+  const defaultPlanOption = plan?.options?.find(option => option.option_id === plan.recommended_option_id) || plan?.options?.[0];
+  const planPanel = topic.status === "awaiting_plan_confirmation" && plan ? `<section class="topic-confirmation"><div><strong>确认研究语义</strong><span>${escapeHtml((plan.ambiguity_reasons || []).join("；"))}</span></div><div class="candidate-list">${(plan.options || []).map(option => `<label class="candidate-card"><input type="radio" name="plan-option" value="${escapeHtml(option.option_id)}" ${option.option_id === plan.recommended_option_id ? "checked" : ""}><span><span class="candidate-title">${escapeHtml(option.label)}</span><span class="candidate-summary">${escapeHtml(option.goal)}</span><span class="candidate-meta">${escapeHtml((option.facets || []).join(" · "))}</span></span></label>`).join("")}</div><div class="plan-editor"><label>目标<input id="plan-goal" value="${escapeHtml(defaultPlanOption?.goal || "")}"></label><label>排除范围<input id="plan-exclusions" value="${escapeHtml((defaultPlanOption?.exclusions || []).join("；"))}"></label><label>研究维度<input id="plan-facets" value="${escapeHtml((defaultPlanOption?.facets || []).join("；"))}"></label><label>查询词<input id="plan-queries" value="${escapeHtml((defaultPlanOption?.queries || []).join("；"))}"></label><button id="plan-confirm" class="button primary" type="button">确认计划</button></div></section>` : "";
   topicDetail.innerHTML = `
     <div class="topic-actions">${searchButton}${autoButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)} · ${escapeHtml(topic.execution_mode || "manual")}</span>${budgetSummary}</div>
     ${planPanel}
@@ -199,13 +215,14 @@ function renderTopic(topic) {
       await selectTopic(topic.run_id);
     } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; searchButtonNode.disabled = false; searchButtonNode.textContent = "搜索候选"; }
   });
-  topicDetail.querySelectorAll("[data-plan-option]").forEach(button => button.addEventListener("click", async () => {
+  document.querySelector("#plan-confirm")?.addEventListener("click", async () => {
     try {
-      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/plan/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option_id: button.dataset.planOption }) });
+      const split = id => (document.querySelector(id)?.value || "").split("；").map(value => value.trim()).filter(Boolean);
+      await request(`/api/topics/${encodeURIComponent(topic.run_id)}/plan/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ option_id: document.querySelector("input[name=plan-option]:checked")?.value || plan.recommended_option_id, edited: { goal: document.querySelector("#plan-goal")?.value || "", exclusions: split("#plan-exclusions"), facets: split("#plan-facets"), queries: split("#plan-queries") } }) });
       await loadTopics();
       await selectTopic(topic.run_id);
     } catch (error) { topicMessage.textContent = error.message; topicMessage.className = "form-message error"; }
-  }));
+  });
   const autoButtonNode = document.querySelector("#topic-auto-button");
   if (autoButtonNode) autoButtonNode.addEventListener("click", async () => {
     autoButtonNode.disabled = true;
@@ -396,7 +413,8 @@ form.addEventListener("submit", async event => {
       body: JSON.stringify({
         url: form.elements.url.value,
         api_key: currentApiKey(),
-        judge_difficulty: form.elements.judge_difficulty.value
+        judge_difficulty: form.elements.judge_difficulty.value,
+        execution_mode: form.elements.execution_mode.value
       })
     });
     form.elements.url.value = "";

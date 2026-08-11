@@ -109,6 +109,24 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(len(selected["selected_sources"]), 1)
             self.assertTrue((root / "runs" / created["run_id"] / "topic_package" / "sources.json").exists())
 
+    def test_v11_plan_operations_and_unified_queries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            created = app.create_topic("教程", execution_mode="manual")
+            self.assertEqual(created["status"], "awaiting_plan_confirmation")
+            plan = app.get_plan(created["run_id"])["plan"]
+            confirmed = app.confirm_plan(created["run_id"], plan["recommended_option_id"], {"goal": "聚焦可复现步骤"})
+            self.assertEqual(confirmed["plan"]["goal"], "聚焦可复现步骤")
+            paused = app.pause_topic(created["run_id"])
+            self.assertEqual(paused["status"], "paused")
+            self.assertEqual(app.retry_topic(created["run_id"])["status"], "created")
+            self.assertEqual(app.get_work_item(created["run_id"])["kind"], "topic")
+            self.assertEqual(app.list_work_items()[0]["execution_mode"], "manual")
+            self.assertIn("model_availability", app.metrics())
+
     def test_lists_and_reads_existing_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

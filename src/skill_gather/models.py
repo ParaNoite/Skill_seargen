@@ -143,6 +143,7 @@ class RunState:
     vision_mode: str = "full"
     vision_frame_limit: int = 12
     run_variant: str = ""
+    execution_mode: str = "manual"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -29,9 +29,10 @@
     <section id="operations-view" class="view-panel" aria-labelledby="operations-title">
       <div class="section-heading"><div><p class="eyebrow">运营总览</p><h1 id="operations-title">任务队列与运行指标</h1></div><button id="metrics-refresh" class="button secondary" type="button">刷新指标</button></div>
       <div id="metrics-grid" class="detail-grid"><div class="metric"><div class="metric-label">正在加载</div><div class="metric-value">-</div></div></div>
+      <div id="operations-list" class="runs-list" aria-live="polite"></div>
     </section>
     <section id="results-view" class="view-panel" hidden aria-labelledby="results-title">
-      <div class="section-heading"><div><p class="eyebrow">结果浏览器</p><h1 id="results-title">知识包与 Skill</h1></div><select id="results-status" aria-label="结果状态"><option value="all">全部状态</option><option value="passed">通过</option><option value="needs_review">待复核</option><option value="failed">失败</option></select></div>
+      <div class="section-heading"><div><p class="eyebrow">结果浏览器</p><h1 id="results-title">知识包与 Skill</h1></div><div class="result-filters"><select id="results-type" aria-label="结果类型"><option value="all">全部类型</option><option value="video">视频</option><option value="topic">主题</option><option value="skill">Skill</option></select><select id="results-status" aria-label="结果状态"><option value="all">全部状态</option><option value="passed">通过</option><option value="needs_review">待复核</option><option value="failed">失败</option></select><input id="results-score" type="number" min="0" max="100" value="0" aria-label="最低评分" placeholder="最低评分"><input id="results-risk" aria-label="风险标记" placeholder="风险标记"><input id="results-source" aria-label="来源" placeholder="来源"><button id="results-export" class="button secondary" type="button">导出所选</button></div></div>
       <div id="results-list" class="runs-list"><div class="loading">选择结果页签后加载。</div></div>
     </section>
     <section class="topic-panel research-view" hidden aria-labelledby="topic-title">
@@ -82,6 +83,7 @@
               <option value="off">关闭 Judge</option>
             </select>
           </div>
+          <div><label for="video-execution-mode">执行模式</label><select id="video-execution-mode" name="execution_mode"><option value="manual">手动</option><option value="auto">自动</option></select></div>
           <div>
             <label for="video-url">B 站公开视频 URL</label>
             <div class="input-row">
