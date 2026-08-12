@@ -65,6 +65,7 @@ async function loadResults() {
 }
 
 window.addEventListener("workspace:view", event => setView(event.detail.view));
+document.querySelectorAll(".workspace-tabs .nav-tab").forEach(tab => tab.addEventListener("click", () => setView(tab.dataset.view)));
 document.querySelector("#metrics-refresh")?.addEventListener("click", loadMetrics);
 ["#results-type", "#results-status", "#results-score", "#results-risk", "#results-source"].forEach(selector => document.querySelector(selector)?.addEventListener("change", loadResults));
 function selectedResultIds() { return [...document.querySelectorAll("[data-result-id]:checked")].map(item => item.dataset.resultId); }

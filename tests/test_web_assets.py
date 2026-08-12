@@ -4,14 +4,23 @@ import unittest
 
 
 class WebAssetRegressionTests(unittest.TestCase):
-    def test_react_navigation_is_built_with_three_workspace_views(self):
+    def test_topic_candidates_keep_structured_workspace_layout(self):
+        root = Path(__file__).resolve().parents[1]
+        css = (root / "src" / "skill_gather" / "web_assets" / "app.css").read_text(encoding="utf-8")
+
+        for selector in (".candidate-list", ".candidate-card", ".candidate-summary", ".candidate-meta", ".candidate-score", ".topic-confirmation"):
+            self.assertIn(selector, css)
+        self.assertRegex(css, re.compile(r"\.candidate-card\s*\{[^}]*grid-template-columns", re.DOTALL))
+
+    def test_react_site_shell_includes_home_catalog_and_workspace(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "frontend" / "nav.jsx").read_text(encoding="utf-8")
         bundle = (root / "src" / "skill_gather" / "web_assets" / "react-nav.js")
-        self.assertIn('createRoot(root).render(<WorkspaceNav />)', source)
-        self.assertIn('["operations", "运营"]', source)
-        self.assertIn('["research", "研究"]', source)
-        self.assertIn('["results", "结果"]', source)
+        self.assertIn('createRoot(root).render(<SiteApp />)', source)
+        self.assertIn("Search</span><span className=\"multiply\">×", source)
+        self.assertIn("浏览 Skills", source)
+        self.assertIn("工作台", source)
+        self.assertIn("/api/catalog", source)
         self.assertTrue(bundle.exists())
 
     def test_video_polling_only_refreshes_selected_active_run_and_serializes_requests(self):

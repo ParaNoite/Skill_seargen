@@ -290,6 +290,31 @@ class WebHttpTests(unittest.TestCase):
         self.assertIn("application/json", api_type)
         self.assertEqual(json.loads(payload), {"runs": []})
 
+    def test_catalog_endpoints_list_detail_and_download_authorized_package(self):
+        status, content_type, payload = self.request("GET", "/api/catalog")
+        items = json.loads(payload)["items"]
+
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        self.assertEqual(len(items), 12)
+        item_id = next(item["id"] for item in items if item["downloadable"])
+
+        detail_status, _, detail_payload = self.request("GET", f"/api/catalog/{item_id}")
+        download_status, download_type, download_payload = self.request("GET", f"/api/catalog/{item_id}/download")
+
+        self.assertEqual(detail_status, 200)
+        self.assertEqual(json.loads(detail_payload)["id"], item_id)
+        self.assertEqual(download_status, 200)
+        self.assertEqual(download_type, "application/zip")
+        self.assertGreater(len(download_payload), 100)
+
+    def test_catalog_rejects_download_for_external_index(self):
+        status, content_type, payload = self.request("GET", "/api/catalog/openai-docs/download")
+
+        self.assertEqual(status, 403)
+        self.assertIn("application/json", content_type)
+        self.assertIn("未获得", json.loads(payload)["error"])
+
     def test_rejects_empty_video_url(self):
         status, _, payload = self.request(
             "POST",

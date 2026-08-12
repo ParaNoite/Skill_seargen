@@ -8,20 +8,23 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark">SS</span>
-      <span>skill_seargen</span>
-    </div>
-    <div class="top-actions">
-      <span class="local-status"><i></i> 本地运行</span>
-      <button id="check-button" class="button secondary" type="button">运行自检</button>
-    </div>
-  </header>
-
   <div id="react-nav"></div>
 
-  <main class="shell">
+  <main id="workspace-root" class="workspace-root" hidden>
+    <header class="workspace-header">
+      <div><p class="section-kicker">WORKBENCH / LOCAL</p><h1>Search × Generate 工作台</h1><p>来源发现与证据蒸馏在同一个可恢复流程中运行。</p></div>
+      <button id="check-button" class="button secondary" type="button">运行自检</button>
+    </header>
+    <section class="engine-overview" aria-label="Search 与 Generate 双轨概览">
+      <article class="engine-track search-track"><div><span>SEARCH / 01</span><strong>发现与选择来源</strong></div><p>视频 · 网页 · GitHub · 语义计划</p></article>
+      <article class="engine-track generate-track"><div><span>GENERATE / 02</span><strong>理解并蒸馏证据</strong></div><p>ASR · 视觉 · 融合 · Skill 生成</p></article>
+    </section>
+    <nav class="workspace-tabs" aria-label="工作台视图">
+      <button class="nav-tab active" data-view="operations" type="button">运营</button>
+      <button class="nav-tab" data-view="research" type="button">研究</button>
+      <button class="nav-tab" data-view="results" type="button">结果</button>
+    </nav>
+    <div class="shell">
     <section id="operations-view" class="view-panel" aria-labelledby="operations-title">
       <div class="section-heading"><div><p class="eyebrow">运营总览</p><h1 id="operations-title">任务队列与运行指标</h1></div><button id="metrics-refresh" class="button secondary" type="button">刷新指标</button></div>
       <div id="metrics-grid" class="detail-grid"><div class="metric"><div class="metric-label">正在加载</div><div class="metric-value">-</div></div></div>
@@ -113,6 +116,7 @@
         </div>
       </section>
     </section>
+    </div>
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .catalog import CatalogStore, default_catalog_root
 from .cli import handle_topic_process, handle_video
 from .automation import choose_auto_sources, persist_video_release_gate
 from .config import load_config
@@ -29,12 +30,13 @@ from .topics import TopicRunStore
 
 
 class WebApp:
-    def __init__(self, *, config: str, runs: str, out: str):
+    def __init__(self, *, config: str, runs: str, out: str, catalog: str | Path | None = None):
         self.config_path = config
         self.runs_path = runs
         self.out_path = out
         self.store = RunStore(runs)
         self.topic_store = TopicRunStore(runs)
+        self.catalog_store = CatalogStore(catalog or default_catalog_root())
         self._jobs: dict[str, dict[str, Any]] = {}
         self._topic_jobs: dict[str, dict[str, Any]] = {}
         self._job_cancellations: dict[str, threading.Event] = {}
@@ -42,6 +44,28 @@ class WebApp:
         self._plan_cancellations: dict[str, threading.Event] = {}
         self._plan_jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+
+    def list_catalog(
+        self,
+        *,
+        query: str = "",
+        category: str = "all",
+        availability: str = "all",
+    ) -> list[dict[str, Any]]:
+        return self.catalog_store.list_items(
+            query=query,
+            category=category,
+            availability=availability,
+        )
+
+    def get_catalog_item(self, item_id: str) -> dict[str, Any]:
+        return self.catalog_store.get_item(item_id)
+
+    def catalog_categories(self) -> list[dict[str, Any]]:
+        return self.catalog_store.categories()
+
+    def download_catalog_item(self, item_id: str) -> tuple[str, bytes]:
+        return self.catalog_store.build_download(item_id)
 
     def list_runs(self) -> list[dict[str, Any]]:
         if not self.store.root.exists():
@@ -641,8 +665,9 @@ def create_server(
     config: str = "config.json",
     runs: str = "./runs",
     out: str = "./skills",
+    catalog: str | Path | None = None,
 ) -> ThreadingHTTPServer:
-    app = WebApp(config=config, runs=runs, out=out)
+    app = WebApp(config=config, runs=runs, out=out, catalog=catalog)
     handler = _handler_for(app)
     return ThreadingHTTPServer((host, port), handler)
 
@@ -663,6 +688,46 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             parsed = urlsplit(self.path)
             path = parsed.path
             query = parse_qs(parsed.query)
+            if path == "/api/catalog":
+                try:
+                    self._send_json({"items": app.list_catalog(
+                        query=query.get("query", [""])[0],
+                        category=query.get("category", ["all"])[0],
+                        availability=query.get("availability", ["all"])[0],
+                    )})
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
+            if path == "/api/catalog/categories":
+                try:
+                    self._send_json({"categories": app.catalog_categories()})
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
+            if path.startswith("/api/catalog/") and path.endswith("/download"):
+                item_id = unquote(path.removeprefix("/api/catalog/").removesuffix("/download").strip("/"))
+                try:
+                    filename, payload = app.download_catalog_item(item_id)
+                except PermissionError as exc:
+                    self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+                    return
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                    return
+                self._send_download(filename, payload)
+                return
+            if path.startswith("/api/catalog/"):
+                item_id = unquote(path.removeprefix("/api/catalog/"))
+                try:
+                    self._send_json(app.get_catalog_item(item_id))
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
             if path == "/api/work-items":
                 self._send_json({"items": app.list_work_items()})
                 return
@@ -879,6 +944,15 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
+
+        def _send_download(self, filename: str, payload: bytes) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
 
         def _send_error_json(self, status: HTTPStatus, message: str) -> None:
             self._send_json({"error": message}, status)

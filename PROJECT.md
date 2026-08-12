@@ -4,7 +4,7 @@
 
 ## 1. 项目定位
 
-`skill_seargen` 是一个本地 CLI 原型，用于从公开视频证据中蒸馏可复核、可追溯的 Codex skill 候选包，并为主题研究任务提供本地可恢复状态。
+`skill_seargen` 是一个本地 Search × Generate 原型：从公开视频、公开网页和代码来源中搜索真实经验，再将多模态证据蒸馏为可复核、可追溯的 Codex skill 候选包，并为主题研究任务提供本地可恢复状态。Web 前台提供受控 Skill 目录，工作台负责展示搜索、生成与审核过程。
 
 v0.1 不追求完整视频下载器或通用多平台系统，只跑通：
 
@@ -32,6 +32,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 | `video-skill-gather-v0.1-plan.md` | v0.1 产品规格和验收标准 | 产品决策变更时同步 |
 | `docs/` | 项目结构、第三方策略、证据契约、测试规范 | 存文档，不存运行产物 |
 | `configs/` | 可复现配置和配置样例 | 不含真实密钥、cookie 或个人绝对路径 |
+| `catalog/` | 经人工挑选的本地 Skill 目录清单与允许再分发的演示包 | 外部来源必须记录地址、版本与许可证状态；未确认再分发权时只建立索引 |
 | `src/skill_gather/` | 主仓库拥有的 CLI、schema、编排和薄适配代码 | 不复制第三方核心算法 |
 | `tests/` | 单元测试和后续集成测试 | 按模块归属放置 |
 | `runs/` | 本地 run 状态、审计包和中间产物 | 默认不进 Git |
@@ -44,6 +45,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 |---|---|---|
 | CLI | `src/skill_gather/cli.py` | 命令入口、参数解析、面向用户的错误语义 |
 | Web 工作台 | `src/skill_gather/web.py`、`frontend/`、`src/skill_gather/web_assets/` | 本地 JSON API、React 视图导航、静态工作台与构建产物 |
+| Skill 目录 | `src/skill_gather/catalog.py`、`catalog/` | 目录清单校验、筛选、详情与受控 ZIP 下载；禁止从目录外读取下载包 |
 | 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、评分结果 |
 | 主题任务 | `src/skill_gather/topics.py` | 主题 run 的持久化、状态推进、预算用量、失败审计与恢复 |
 | 语义计划 | `src/skill_gather/planning.py` | 模糊主题判定、结构化语义方案、规则降级与确认 |

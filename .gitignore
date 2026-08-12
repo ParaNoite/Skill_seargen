@@ -11,12 +11,24 @@ dist/
 node_modules/
 .venv/
 venv/
+.uv-cache/
+
+# Local browser/tooling artifacts
+.playwright-cli/
+.workbuddy/
+output/
 
 # Local secrets and runtime artifacts
 .env
 config.json
+*.bak-*
 runs/
 skills/
+
+# Local installers and downloaded binaries
+Docker Desktop Installer.exe
+*.msi
+*.iso
 
 # Local third-party source trees. Keep only documented instructions.
 third_party/*
