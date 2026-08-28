@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>极光冲刺 | 2D 跑酷</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="game-shell">
+    <header><div><p class="kicker">BASELINE RUNNER</p><h1>极光冲刺 <span>2D</span></h1></div><div class="scoreboard"><b id="score">0</b><small>距离</small></div></header>
+    <section class="game-stage" aria-label="2D 跑酷游戏"><canvas id="game" width="960" height="540"></canvas><div id="overlay" class="overlay"><p id="result-label">准备出发</p><h2 id="result-title">穿过极光门</h2><button id="restart" type="button">开始游戏</button></div></section>
+    <footer><span>方向键 / A D 切换跑道</span><span>躲开信标，抵达 1,000 米</span></footer>
+  </main>
+  <script src="game.js"></script>
+</body>
+</html>

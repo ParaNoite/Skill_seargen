@@ -15,6 +15,7 @@ from skill_gather.search import (
     SearchCache,
     SearXNGProvider,
     build_queries,
+    build_search_intent,
     canonicalize_url,
     infer_source_type,
     normalize_candidates,
@@ -38,6 +39,40 @@ CONFIG = {
 
 
 class SearchTests(unittest.TestCase):
+    def test_bilibili_opus_is_web_evidence_not_video(self):
+        self.assertEqual(
+            infer_source_type("https://www.bilibili.com/opus/853329045898657800"),
+            "web",
+        )
+
+    def test_query_expansion_runs_before_provider_fallbacks(self):
+        queries = build_queries(
+            "Godot 4 程序化地牢",
+            "technical",
+            "github",
+            max_queries=2,
+            extra_queries=["Godot 4 deterministic dungeon tests"],
+        )
+
+        self.assertEqual(
+            queries,
+            ["Godot 4 程序化地牢", "Godot 4 deterministic dungeon tests"],
+        )
+
+    def test_complex_topic_keeps_each_acceptance_facet(self):
+        intent, warning = build_search_intent(
+            "Godot 4 可复现 2D 程序化地牢生成：TileMap、确定性种子、连通性校验与自动化测试",
+            "technical",
+            None,
+            "",
+            use_llm=False,
+        )
+
+        self.assertIsNone(warning)
+        self.assertIn("确定性种子", intent.facets)
+        self.assertIn("连通性校验", intent.facets)
+        self.assertIn("自动化测试", intent.facets)
+
     def test_github_issue_and_pull_urls_are_web_evidence_not_repository_sources(self):
         self.assertEqual(infer_source_type("https://github.com/godotengine/godot"), "github")
         self.assertEqual(infer_source_type("https://github.com/godotengine/godot/issues/88648"), "web")
@@ -83,6 +118,32 @@ class SearchTests(unittest.TestCase):
         )
 
         self.assertEqual(queries[1], "Godot signal event bus")
+
+    def test_github_queries_do_not_split_3d_into_orphan_d(self):
+        queries = build_queries(
+            "Three.js 浏览器 3D 跑酷：角色控制、跟随镜头与碰撞",
+            "technical",
+            "github",
+            max_queries=3,
+        )
+
+        self.assertEqual(queries[1], "Three.js")
+        self.assertNotIn("Three.js D", queries)
+
+    def test_github_queries_compact_long_english_expansion(self):
+        queries = build_queries(
+            "Three.js 浏览器 3D 跑酷",
+            "technical",
+            "github",
+            max_queries=5,
+            extra_queries=["Three.js 3D endless runner mobile touch controls responsive"],
+        )
+
+        self.assertEqual(queries[:3], [
+            "Three.js 浏览器 3D 跑酷",
+            "Three.js 3D endless runner mobile touch controls responsive",
+            "Three.js 3D endless runner",
+        ])
 
     def test_canonicalize_url_removes_tracking_and_fragment(self):
         self.assertEqual(
@@ -209,6 +270,35 @@ class SearchTests(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             SearXNGProvider("").search(["test"], max_results=5)
         self.assertIn("SearXNG", str(context.exception))
+
+    def test_searxng_reports_unresponsive_engines_and_zero_results(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({
+                    "results": [],
+                    "unresponsive_engines": [["brave", "timeout"], ["baidu", "Suspended: CAPTCHA"]],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            batch = SearXNGProvider(f"http://127.0.0.1:{server.server_port}").search(["three.js"], max_results=5)
+            self.assertEqual(batch.results, [])
+            self.assertTrue(any("brave: timeout" in warning for warning in batch.warnings))
+            self.assertTrue(any(warning.startswith("no_results:") for warning in batch.warnings))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_bilibili_412_falls_back_to_public_search_page(self):
         class Handler(BaseHTTPRequestHandler):

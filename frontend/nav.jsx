@@ -16,13 +16,16 @@ function SkillCard({ item, featured = false, onOpen }) {
       <span className="skill-box-rule" style={{ backgroundColor: accents[item.accent] || accents.blue }} />
       <span className="skill-box-head">
         <span className="skill-symbol" aria-hidden="true" style={{ color: accents[item.accent] || accents.blue }}>{skillSymbols[item.icon] || "·"}</span>
-        <span className={`availability ${item.downloadable ? "ready" : "source"}`}>
-          {item.downloadable ? "可下载" : item.review_status === "needs_review" ? "待复核索引" : "来源索引"}
+        <span className="skill-box-badges">
+          {item.featured && <span className="hot-badge">热门观察</span>}
+          <span className={`availability ${item.downloadable ? "ready" : "source"}`}>
+            {item.downloadable ? "可下载" : item.review_status === "needs_review" ? "待复核索引" : "来源索引"}
+          </span>
         </span>
       </span>
       <strong>{item.title}</strong>
       <span className="skill-summary">{item.summary}</span>
-      <span className="skill-box-foot"><span>{item.category}</span><span>{item.source_label}</span></span>
+      <span className="skill-box-foot"><span>{item.category}</span><span>{item.popularity?.label || item.source_label}</span></span>
     </button>
   );
 }
@@ -51,6 +54,7 @@ function SkillDetail({ item, onClose }) {
           <section><span className="detail-label">如何获得</span><p>{item.downloadable ? "本地演示包已通过再分发检查，可直接下载 ZIP。" : "当前仅收录公开来源，不在本站镜像；请前往原始地址确认许可与安装方式。"}</p></section>
           <section><span className="detail-label">证据</span><ul className="detail-list">{item.evidence.map(value => <li key={value}>{value}</li>)}</ul></section>
           <section><span className="detail-label">风险</span><ul className="detail-list risk">{item.risks.map(value => <li key={value}>{value}</li>)}</ul></section>
+          {item.popularity?.status === "observed" && <section className="popularity-detail"><span className="detail-label">热度观察</span><p>{item.popularity.label || "公开来源观察"}{item.popularity.observed_at ? ` · 观察于 ${item.popularity.observed_at}` : ""}</p><ul className="detail-list">{item.popularity.signals.map(value => <li key={value}>{value}</li>)}</ul>{item.popularity.limitations.length > 0 && <p className="popularity-limit">局限：{item.popularity.limitations.join("；")}</p>}</section>}
           <dl className="provenance-list">
             <div><dt>来源</dt><dd><a href={item.source_url} target="_blank" rel="noreferrer">{item.source_label}</a></dd></div>
             <div><dt>版本</dt><dd>{item.source_version}</dd></div>
@@ -65,6 +69,7 @@ function SkillDetail({ item, onClose }) {
 }
 
 function Home({ items, onBrowse, onOpen }) {
+  const hotItems = items.filter(item => item.featured && item.popularity?.status === "observed").slice(0, 6);
   return (
     <main className="site-page home-page">
       <section className="hero" aria-labelledby="hero-title">
@@ -83,6 +88,10 @@ function Home({ items, onBrowse, onOpen }) {
           {items.slice(0, 6).map((item, index) => <SkillCard key={item.id} item={item} featured={index < 2} onOpen={onOpen} />)}
         </div>
         <div className="hero-index"><span>{String(items.length).padStart(2, "0")} SKILLS</span><span>{String(items.filter(item => item.downloadable).length).padStart(2, "0")} LOCAL PACKAGES</span><span>03 SOURCE TYPES</span></div>
+      </section>
+      <section className="hot-section" aria-labelledby="hot-title">
+        <div className="hot-heading"><div><p className="section-kicker">PUBLIC SIGNALS / 02</p><h2 id="hot-title">热门 Skill 观察</h2><p>按公开来源信号精选，不把单一榜单或瞬时排名当成普遍热度。</p></div><button className="secondary-action" type="button" onClick={onBrowse}>查看完整目录</button></div>
+        {hotItems.length > 0 ? <div className="hot-grid">{hotItems.map(item => <SkillCard key={item.id} item={item} featured onOpen={onOpen} />)}</div> : <div className="hot-empty">热门观察正在收集可复核来源，当前先浏览完整目录。</div>}
       </section>
       <section className="thesis-band">
         <p>没有 Search，Generate 只是猜测。</p><span>×</span><p>没有 Generate，Search 只是资料堆。</p>

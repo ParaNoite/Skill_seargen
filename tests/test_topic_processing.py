@@ -3,16 +3,16 @@ import http.client
 import os
 import ssl
 import tempfile
-import threading
 import unittest
 import urllib.error
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from skill_gather.cli import main
 from skill_gather.github_processing import (
     GitHubFile,
     GitHubRepositorySnapshot,
+    select_interesting_paths,
     _get_text,
     fetch_public_github_repository,
     process_github_sources,
@@ -24,6 +24,66 @@ from skill_gather.web_text import _TextExtractor
 
 
 class TopicProcessingTests(unittest.TestCase):
+    def test_github_path_selection_includes_game_runtime_sources(self):
+        tree = [
+            {"type": "blob", "path": "README.md"},
+            {"type": "blob", "path": "src/game.js"},
+            {"type": "blob", "path": "src/collision.js"},
+            {"type": "blob", "path": "src/mobile-input.ts"},
+            {"type": "blob", "path": "assets/texture.js"},
+        ]
+
+        selected = select_interesting_paths(tree, max_files=10)
+
+        self.assertIn("src/game.js", selected)
+        self.assertIn("src/collision.js", selected)
+        self.assertIn("src/mobile-input.ts", selected)
+        self.assertNotIn("assets/texture.js", selected)
+
+    def test_github_path_selection_includes_mobile_game_scripts_outside_src(self):
+        tree = [
+            {"type": "blob", "path": "README.md"},
+            {"type": "blob", "path": "scripts/touch-controls.js"},
+            {"type": "blob", "path": "scripts/resize.js"},
+            {"type": "blob", "path": "js/game-state.js"},
+            {"type": "blob", "path": "lib/components/collision.js"},
+            {"type": "blob", "path": "assets/vendor-three.js"},
+        ]
+
+        selected = select_interesting_paths(tree, max_files=24)
+
+        self.assertIn("scripts/touch-controls.js", selected)
+        self.assertIn("scripts/resize.js", selected)
+        self.assertIn("js/game-state.js", selected)
+        self.assertIn("lib/components/collision.js", selected)
+        self.assertNotIn("assets/vendor-three.js", selected)
+
+    def test_github_api_signals_prioritize_complete_gameplay_evidence(self):
+        from skill_gather.github_processing import _signals_for_file
+
+        signals = _signals_for_file(
+            "scripts/game.js",
+            "\n".join(
+                [
+                    "const score = 0;",
+                    "function updateDecorations() {}",
+                    "window.addEventListener('pointerdown', handleTouch);",
+                    "window.addEventListener('resize', onResize);",
+                    "function checkAABB(player, obstacle) { return true; }",
+                    "if (gameOver) showGameOver();",
+                    "function restartGame() { resetState(); }",
+                    "requestAnimationFrame(gameLoop);",
+                ]
+            ),
+        )
+
+        api = " ".join(item.lower() for item in signals["api"])
+        self.assertIn("pointerdown", api)
+        self.assertIn("resize", api)
+        self.assertIn("checkaabb", api)
+        self.assertIn("gameover", api)
+        self.assertIn("restartgame", api)
+
     def test_web_text_prefers_main_content_over_large_navigation_sidebar(self):
         extractor = _TextExtractor()
         extractor.feed(
@@ -144,64 +204,57 @@ class TopicProcessingTests(unittest.TestCase):
             self.assertEqual(audit["skipped_sources"][0]["candidate_id"], "cand-video")
 
     def test_topic_process_command_completes_normal_web_run(self):
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                body = (
-                    "<html><head><title>网页教程</title></head><body>"
-                    "<script>const hidden = '不应进入网页证据';</script>"
-                    "<h1>网页教程</h1><p>首先安装工具，然后配置项目。</p>"
-                    "<p>使用示例验证配置是否成功，最后记录结果。请在每次修改后运行验证命令，"
-                    "并保留可复查的输出，以便确认配置、依赖与实际效果一致。</p>"
-                    "</body></html>"
-                ).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("网页教程", mode="normal")
+            candidate = TopicSourceCandidate(
+                url="https://docs.example.test/guide",
+                candidate_id="cand-guide",
+                source_type="web",
+                title="网页教程",
+                selected=True,
+            )
+            task.candidates = [candidate]
+            task.selected_sources = [candidate]
+            task.status = "processing_sources"
+            task.current_stage = "processing_sources"
+            store.save(task)
 
-            def log_message(self, *_args):
-                return
+            from io import StringIO
+            from skill_gather.web_text import WebPage
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                store = TopicRunStore(Path(temp_dir) / "runs")
-                task = store.start_or_resume("网页教程", mode="normal")
-                candidate = TopicSourceCandidate(
-                    url=f"http://127.0.0.1:{server.server_port}/guide",
-                    candidate_id="cand-guide",
-                    source_type="web",
+            def fixture_fetcher(_url, *, timeout_sec):
+                self.assertEqual(timeout_sec, 15)
+                return WebPage(
+                    requested_url="https://docs.example.test/guide",
+                    final_url="https://docs.example.test/guide",
                     title="网页教程",
-                    selected=True,
+                    content_type="text/html",
+                    text=(
+                        "首先安装工具，然后配置项目。使用示例验证配置是否成功，"
+                        "最后记录结果。请在每次修改后运行验证命令，并保留可复查的输出，"
+                        "以便确认配置、依赖与实际效果一致。"
+                    ) * 3,
                 )
-                task.candidates = [candidate]
-                task.selected_sources = [candidate]
-                task.status = "processing_sources"
-                task.current_stage = "processing_sources"
-                store.save(task)
 
-                from io import StringIO
-
-                stdout = StringIO()
+            stdout = StringIO()
+            with patch(
+                "skill_gather.cli.process_web_sources",
+                side_effect=lambda current_task, run_root, *, timeout_sec: process_web_sources(
+                    current_task, run_root, timeout_sec=timeout_sec, fetcher=fixture_fetcher
+                ),
+            ):
                 exit_code = main(
                     ["topic", "process", task.run_id, "--runs", str(store.root)],
                     stdout=stdout,
                 )
 
-                payload = json.loads(stdout.getvalue())
-                self.assertEqual(exit_code, 0)
-                self.assertEqual(payload["status"], "completed")
-                knowledge = store.run_path(task.run_id) / "topic_package/knowledge.md"
-                self.assertTrue(knowledge.exists())
-                self.assertIn("网页教程", knowledge.read_text(encoding="utf-8"))
-                self.assertNotIn("不应进入网页证据", knowledge.read_text(encoding="utf-8"))
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["status"], "completed")
+            knowledge = store.run_path(task.run_id) / "topic_package/knowledge.md"
+            self.assertTrue(knowledge.exists())
+            self.assertIn("网页教程", knowledge.read_text(encoding="utf-8"))
 
     def test_process_github_sources_writes_technical_evidence_and_reference(self):
         with tempfile.TemporaryDirectory() as temp_dir:

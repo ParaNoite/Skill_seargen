@@ -11,10 +11,19 @@
   <div id="react-nav"></div>
 
   <main id="workspace-root" class="workspace-root" hidden>
+    <section id="operation-progress" class="operation-progress idle" aria-live="polite">
+      <div class="operation-copy"><strong id="operation-title">就绪</strong><span id="operation-detail">等待操作</span></div>
+      <div class="operation-meter" aria-hidden="true"><span id="operation-meter-fill"></span></div>
+      <span id="operation-time" class="run-meta"></span>
+    </section>
     <header class="workspace-header">
       <div><p class="section-kicker">WORKBENCH / LOCAL</p><h1>Search × Generate 工作台</h1><p>来源发现与证据蒸馏在同一个可恢复流程中运行。</p></div>
-      <button id="check-button" class="button secondary" type="button">运行自检</button>
+      <div class="workspace-actions">
+        <button id="readiness-button" class="button primary" type="button">检查真实功能</button>
+        <button id="check-button" class="button secondary" type="button">运行自检</button>
+      </div>
     </header>
+    <section id="readiness-panel" class="readiness-panel" hidden></section>
     <section class="engine-overview" aria-label="Search 与 Generate 双轨概览">
       <article class="engine-track search-track"><div><span>SEARCH / 01</span><strong>发现与选择来源</strong></div><p>视频 · 网页 · GitHub · 语义计划</p></article>
       <article class="engine-track generate-track"><div><span>GENERATE / 02</span><strong>理解并蒸馏证据</strong></div><p>ASR · 视觉 · 融合 · Skill 生成</p></article>
@@ -118,6 +127,25 @@
     </section>
     </div>
   </main>
+
+  <div id="artifact-preview" class="artifact-preview" hidden>
+    <button id="artifact-preview-backdrop" class="artifact-preview-backdrop" type="button" aria-label="关闭产物预览"></button>
+    <section class="artifact-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-preview-title">
+      <header class="artifact-preview-header">
+        <div><p class="eyebrow">产物预览</p><h2 id="artifact-preview-title">产物</h2><p id="artifact-preview-meta" class="run-meta"></p></div>
+        <button id="artifact-preview-close" class="icon-button" type="button" aria-label="关闭产物预览" title="关闭">×</button>
+      </header>
+      <div id="artifact-preview-tabs" class="artifact-preview-tabs" role="tablist" aria-label="产物类型">
+        <button class="artifact-preview-tab active" data-artifact-mode="course" type="button" role="tab">给人看的课程</button>
+        <button class="artifact-preview-tab" data-artifact-mode="skill" type="button" role="tab">Agent Skill</button>
+      </div>
+      <pre id="artifact-preview-content" class="artifact-preview-content" tabindex="0"></pre>
+      <footer class="artifact-preview-actions">
+        <a id="artifact-download-course" class="button secondary" download>下载课程文档</a>
+        <a id="artifact-download-skill" class="button primary" download>下载 Skill 包</a>
+      </footer>
+    </section>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/react-nav.js" type="module"></script>

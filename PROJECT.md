@@ -4,7 +4,7 @@
 
 ## 1. 项目定位
 
-`skill_seargen` 是一个本地 Search × Generate 原型：从公开视频、公开网页和代码来源中搜索真实经验，再将多模态证据蒸馏为可复核、可追溯的 Codex skill 候选包，并为主题研究任务提供本地可恢复状态。Web 前台提供受控 Skill 目录，工作台负责展示搜索、生成与审核过程。
+`skill_seargen` 是一个本地 Search × Generate 原型：从公开视频、公开网页和代码来源中搜索真实经验，再将多模态证据同时蒸馏为面向人的课程与面向 AI 的可执行 Skill，并为主题研究任务提供本地可恢复状态。Web 前台提供受控 Skill 目录，工作台负责展示搜索、学习、生成与审核过程。
 
 v0.1 不追求完整视频下载器或通用多平台系统，只跑通：
 
@@ -37,6 +37,8 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 | `tests/` | 单元测试和后续集成测试 | 按模块归属放置 |
 | `runs/` | 本地 run 状态、审计包和中间产物 | 默认不进 Git |
 | `skills/` | 本地生成的候选 skill 包 | 默认不进 Git，受控样例需单独说明 |
+| `.agents/supervisor/` | Codex 主 Agent 的自主监工契约、角色协议和已验证环境记忆 | 只存指令、模板和不含凭据的环境记忆，不存运行产物 |
+| `.agent-lab/` | 监工状态、subagent 报告和浏览器审计 | 默认不进 Git，不存真实密钥或模型原文 |
 | `third_party/` | 本地 clone 的外部后端或 fork | 源码默认不由主仓库跟踪 |
 
 ## 3. 源码模块归属
@@ -46,11 +48,12 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 | CLI | `src/skill_gather/cli.py` | 命令入口、参数解析、面向用户的错误语义 |
 | Web 工作台 | `src/skill_gather/web.py`、`frontend/`、`src/skill_gather/web_assets/` | 本地 JSON API、React 视图导航、静态工作台与构建产物 |
 | Skill 目录 | `src/skill_gather/catalog.py`、`catalog/` | 目录清单校验、筛选、详情与受控 ZIP 下载；禁止从目录外读取下载包 |
-| 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、评分结果 |
+| 数据模型 | `src/skill_gather/models.py` | Manifest、EvidenceTimeline、RunState、TopicPackage、评分结果 |
 | 主题任务 | `src/skill_gather/topics.py` | 主题 run 的持久化、状态推进、预算用量、失败审计与恢复 |
+| 监督证据 | `src/skill_gather/capture.py` | Playwright 截图/Trace 登记、TED 展示帧筛选、脱敏和离线素材索引 |
 | 语义计划 | `src/skill_gather/planning.py` | 模糊主题判定、结构化语义方案、规则降级与确认 |
 | 研究自动化 | `src/skill_gather/automation.py` | 预算内多样化选源与保守自动发布门槛 |
-| 主题证据融合 | `src/skill_gather/pipeline/topic_fusion.py` | 网页、视频和 GitHub 证据的结论级融合、冲突与缺口记录 |
+| 主题证据融合 | `src/skill_gather/pipeline/topic_fusion.py` | 网页、视频和 GitHub 证据的结论级融合，并分别生成面向人的 `COURSE.md` 与审计型 `knowledge.md` |
 | 技术主题生成 | `src/skill_gather/distillers/technical_skill.py` | 技术主题 `SKILL.md`、references、分维度评分与人工复核 |
 | 来源适配 | `src/skill_gather/adapters/` | B站、未来 YouTube 等平台适配 |
 | 外部集成 | `src/skill_gather/integrations/` | `yt-dlp`、`ffmpeg`、newapi 等工具/API 的薄包装 |
@@ -69,7 +72,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 - Python 包依赖进入 `pyproject.toml`。
 - `yt-dlp`、`ffmpeg` 这类外部命令默认不入仓，由集成层检测并调用。
 - faster-whisper 是 v0.1 主链路必需的本地 ASR 后端，由 `integrations/faster_whisper.py` 薄包装访问；模型权重、缓存和转写产物不入仓。
-- newapi 是外部服务，只通过 `integrations/newapi.py` 之类的薄包装访问，负责视觉、蒸馏和 judge；v0.1 不把 newapi 远端 ASR 作为替代路径。
+- newapi 是外部服务，只通过 `integrations/newapi.py` 之类的薄包装访问，负责视觉、教学蒸馏、Skill 蒸馏和 Judge；v0.1 不把 newapi 远端 ASR 作为替代路径。
 - 真正 fork 或本地 clone 的第三方源码放在 `third_party/<project-name>/`，源码默认不由主仓库跟踪。
 - 第三方来源、版本、license、patch 和调用方式登记到 `THIRD_PARTY.md` 或模块文档。
 
@@ -99,7 +102,7 @@ v0.3 新增主题任务与主题包契约、主题级 run、预算和缓存策�
 - `TopicTask`
 - `TopicPackage`
 
-主题任务通过 `TopicTask` 交接主题、模式、执行模式、语义计划及审计、暂停来源、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据和文本快照；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。v0.7 写入 GitHub 轻量结构化证据、reference 摘要和 `github_processing_audit.json`。v0.8 统一读取主题 evidence，写入 `fusion.json` 和 `knowledge.md`。v0.9 技术模式额外写入 `SKILL.md`、`score.json` 和人工复核记录；v1.1 额外写入结构化语义计划、自动选源审计和 `release_gate.json`。
+主题任务通过 `TopicTask` 交接主题、模式、执行模式、语义计划及审计、暂停来源、预算、实际用量、缓存策略、候选来源、已选来源、视频子 run、阶段状态、失败记录和主题包索引。`TopicPackage` 中的路径必须相对主题 run 目录；v0.4 额外写入候选、选择和 `search_audit.json`。确认动作原子写入 `selected_sources` 与 `sources.json`，并进入 `processing_sources`。v0.5 写入网页结构化证据和文本快照；v0.6 额外在 `video_runs/` 建立子 run，并将成功视频的 `EvidenceTimeline` 写入主题包。v0.7 写入 GitHub 轻量结构化证据、reference 摘要和 `github_processing_audit.json`。当前 Generate 统一读取主题 evidence，写入 `fusion.json`、面向人类学习的 `COURSE.md`、面向审核的 `knowledge.md` 与 `course_audit.json`；技术模式额外写入 `SKILL.md`、`score.json` 和人工复核记录。研究自动化额外写入结构化语义计划、自动选源审计和 `release_gate.json`。
 
 所有 manifest 和运行记录必须使用仓库相对路径或用户显式配置的输出路径，不得写入凭据、cookie 或临时下载 URL。
 

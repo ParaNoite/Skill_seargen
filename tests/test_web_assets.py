@@ -23,6 +23,29 @@ class WebAssetRegressionTests(unittest.TestCase):
         self.assertIn("/api/catalog", source)
         self.assertTrue(bundle.exists())
 
+    def test_school_frontend_clone_has_its_own_source_and_assets(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "frontend-school" / "nav.jsx").read_text(encoding="utf-8")
+        asset_root = root / "src" / "skill_gather" / "web_assets_school"
+
+        self.assertIn("AI 大学", source)
+        self.assertIn("技能市场", source)
+        self.assertIn("教务工作台", source)
+        for name in ("index.html", "app.css", "app.js", "react-nav.js"):
+            self.assertTrue((asset_root / name).is_file(), name)
+
+    def test_school_home_uses_four_product_entries_instead_of_skill_preview(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "frontend-school" / "nav.jsx").read_text(encoding="utf-8")
+        home = source[source.index("function Home"):source.index("function Catalog")]
+
+        for label in ("单视频蒸馏", "主题研究", "技能包市场", "Agent 市场"):
+            self.assertIn(label, source)
+        self.assertIn('className="home-actions"', home)
+        self.assertNotIn("hero-shelf", home)
+        self.assertNotIn("SkillCard", home)
+        self.assertIn('workspaceTarget === "topic" ? "#topic-input" : "#video-url"', source)
+
     def test_video_polling_only_refreshes_selected_active_run_and_serializes_requests(self):
         asset = _read_app_js()
 
@@ -59,6 +82,27 @@ class WebAssetRegressionTests(unittest.TestCase):
 
         self.assertIn("预算：候选", asset)
         self.assertIn("缓存", asset)
+
+
+    def test_topic_confirmation_layout_keeps_plan_controls_full_width(self):
+        root = Path(__file__).resolve().parents[1]
+        for relative in ("src/skill_gather/web_assets/app.css", "src/skill_gather/web_assets_school/app.css"):
+            css = (root / relative).read_text(encoding="utf-8")
+            self.assertRegex(css, re.compile(r"\.operation-progress\s*\{[^}]*position:\s*relative", re.DOTALL))
+            self.assertIn(".topic-confirmation .candidate-list { grid-column: 1 / -1;", css)
+            self.assertRegex(css, re.compile(r"\.plan-editor\s*\{[^}]*grid-column:\s*1 / -1", re.DOTALL))
+
+    def test_result_artifact_preview_and_download_controls_exist(self):
+        root = Path(__file__).resolve().parents[1]
+        for asset_root in (root / "src/skill_gather/web_assets", root / "src/skill_gather/web_assets_school"):
+            html = (asset_root / "index.html").read_text(encoding="utf-8")
+            javascript = (asset_root / "app.js").read_text(encoding="utf-8")
+            css = (asset_root / "app.css").read_text(encoding="utf-8")
+            self.assertIn('id="artifact-preview"', html)
+            self.assertIn("openArtifactPreview", javascript)
+            self.assertIn("/download/${kind}", javascript)
+            self.assertIn('actualMode === "skill" ? "Agent Skill" : "产物摘要"', javascript)
+            self.assertIn(".artifact-preview-dialog", css)
 
 
 def _read_app_js() -> str:

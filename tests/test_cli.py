@@ -13,7 +13,7 @@ from skill_gather.topics import TopicRunStore
 CONFIG = {
     "providers": {
         "newapi": {
-            "base_url": "https://api.renice.cc/v1",
+            "base_url": "https://api.example.test/v1",
             "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
             "asr_model": "faster-whisper:base",
@@ -30,18 +30,110 @@ CONFIG = {
 
 
 class CliTests(unittest.TestCase):
+    def test_supervise_run_creates_then_resumes_without_user_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "supervisor.json"
+            config_path.write_text("{}", encoding="utf-8")
+            lab = root / "lab"
+
+            first = io.StringIO()
+            self.assertEqual(main(["supervise", "run", "--config", str(config_path), "--lab", str(lab)], stdout=first), 0)
+            second = io.StringIO()
+            self.assertEqual(main(["supervise", "run", "--config", str(config_path), "--lab", str(lab)], stdout=second), 0)
+
+            self.assertFalse(json.loads(first.getvalue())["resumed"])
+            self.assertTrue(json.loads(second.getvalue())["resumed"])
+
+    def test_supervise_commands_create_status_and_theme(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "supervisor.json"
+            config_path.write_text(json.dumps({"supervisor": {"ted_critical_topics": ["opening-game"]}}), encoding="utf-8")
+            lab = root / "lab"
+
+            started = io.StringIO()
+            self.assertEqual(
+                main(["supervise", "start", "--config", str(config_path), "--lab", str(lab), "--id", "demo"], stdout=started),
+                0,
+            )
+            self.assertEqual(json.loads(started.getvalue())["supervision_id"], "demo")
+            self.assertTrue((lab / "demo" / "capture-index.json").is_file())
+            self.assertTrue((lab / "demo" / "capture-index.md").is_file())
+            self.assertTrue((lab / "demo" / "showcase.html").is_file())
+
+            themed = io.StringIO()
+            self.assertEqual(
+                main(["supervise", "theme", "demo", "opening-game", "--reason", "TED 关键主题", "--utility-score", "90", "--lab", str(lab)], stdout=themed),
+                0,
+            )
+            self.assertEqual(json.loads(themed.getvalue())["acceptance_level"], "ted_critical")
+
+            status = io.StringIO()
+            self.assertEqual(main(["supervise", "status", "demo", "--lab", str(lab)], stdout=status), 0)
+            self.assertEqual(len(json.loads(status.getvalue())["theme_queue"]), 1)
+
+    def test_supervise_capture_requires_trace_and_generates_offline_showcase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "supervisor.json"
+            config_path.write_text(json.dumps({"supervisor": {"capture": {"require_trace": True}}}), encoding="utf-8")
+            lab = root / "lab"
+            self.assertEqual(main(["supervise", "start", "--config", str(config_path), "--lab", str(lab), "--id", "demo"]), 0)
+            theme = io.StringIO()
+            self.assertEqual(
+                main([
+                    "supervise", "theme", "demo", "AI 课程生成", "--reason", "TED 核心", "--ted-relevance-score", "90",
+                    "--beat", "course_skill", "--lab", str(lab),
+                ], stdout=theme),
+                0,
+            )
+            run_root = lab / "demo"
+            screenshot = run_root / "captures/theme-001/result/screen.png"
+            trace = run_root / "captures/theme-001/result/flow.trace.zip"
+            screenshot.parent.mkdir(parents=True)
+            screenshot.write_text("placeholder", encoding="utf-8")
+            trace.write_text("trace", encoding="utf-8")
+
+            missing_trace = io.StringIO()
+            self.assertEqual(
+                main([
+                    "supervise", "capture", "demo", "--theme-id", "theme-001", "--topic", "AI 课程生成",
+                    "--stage", "result", "--event", "course_skill_result", "--screenshot", str(screenshot), "--lab", str(lab),
+                ], stderr=missing_trace),
+                2,
+            )
+            self.assertIn("Trace", missing_trace.getvalue())
+
+            captured = io.StringIO()
+            self.assertEqual(
+                main([
+                    "supervise", "capture", "demo", "--theme-id", "theme-001", "--topic", "AI 课程生成",
+                    "--stage", "result", "--event", "course_skill_result", "--screenshot", str(screenshot),
+                    "--trace", str(trace), "--narrative-score", "40", "--information-score", "25",
+                    "--visual-score", "20", "--evidence-score", "15", "--beat", "course_skill", "--lab", str(lab),
+                ], stdout=captured),
+                0,
+            )
+            output = io.StringIO()
+            self.assertEqual(main(["supervise", "showcase", "demo", "--lab", str(lab)], stdout=output), 0)
+            paths = json.loads(output.getvalue())
+            self.assertTrue(Path(paths["markdown"]).is_file())
+            self.assertTrue(Path(paths["html"]).is_file())
+
     def test_web_server_retries_with_system_port_after_windows_bind_error(self):
         error = OSError("permission denied")
         error.winerror = 10013
         server = object()
         create_server = unittest.mock.Mock(side_effect=[error, server])
-        args = unittest.mock.Mock(host="127.0.0.1", port=8765, config="config.json", runs="runs", out="skills")
+        args = unittest.mock.Mock(host="127.0.0.1", port=8765, config="config.json", runs="runs", out="skills", assets_dir="school-assets")
 
         result = _create_web_server(create_server, args)
 
         self.assertIs(result, server)
         self.assertEqual(create_server.call_args_list[0].kwargs["port"], 8765)
         self.assertEqual(create_server.call_args_list[1].kwargs["port"], 0)
+        self.assertEqual(create_server.call_args_list[0].kwargs["assets_dir"], "school-assets")
 
     def test_model_check_reports_real_probe_status_without_echoing_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:

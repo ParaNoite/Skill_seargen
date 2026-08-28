@@ -3,11 +3,16 @@
   "version": "1.1.0",
   "private": true,
   "scripts": {
+    "setup:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\setup-local.ps1",
+    "start": "scripts\\start-web.cmd",
+    "start2": "npm run frontend2:build && scripts\\start-web2.cmd",
     "dev": "scripts\\dev.cmd",
     "web": "scripts\\start-web.cmd",
     "test": ".\\.venv\\Scripts\\python.exe -m unittest discover -s tests",
     "cli": ".\\.venv\\Scripts\\python.exe -m skill_gather --help",
-    "frontend:build": "vite build"
+    "opencode": "scripts\\opencode-agent.cmd",
+    "frontend:build": "vite build",
+    "frontend2:build": "vite build --config vite.school.config.mjs"
   },
   "dependencies": {
     "react": "^19.1.1",
@@ -15,6 +20,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.5",
+    "playwright": "^1.58.2",
     "vite": "^8.2.1"
   }
 }

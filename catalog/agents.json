@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "ppt-presenter",
+      "name": "PPT Presenter",
+      "role": "演示文稿顾问",
+      "summary": "将汇报目标、可靠素材和审阅要求整理为可交付的演示文稿方案。",
+      "description": "适合产品演示、课程讲解和研究汇报。它先组织叙事和证据，再生成并检查 PPTX 交付物。",
+      "skills": ["ppt-agent", "skill-release-review"],
+      "accent": "orange",
+      "status": "可上岗"
+    },
+    {
+      "id": "research-analyst",
+      "name": "Research Analyst",
+      "role": "研究与证据分析师",
+      "summary": "从公开网页和视频材料中提炼带来源、风险与结论边界的研究底稿。",
+      "description": "适合需要先核验资料、再形成课程或工作结论的任务。输出会保留来源、冲突和待复核事项。",
+      "skills": ["web-knowledge-extractor", "video-evidence-distiller", "multi-source-fusion", "skill-release-review"],
+      "accent": "cyan",
+      "status": "可上岗"
+    },
+    {
+      "id": "browser-game-maker",
+      "name": "Browser Game Maker",
+      "role": "网页游戏原型工程师",
+      "summary": "制作可玩的浏览器游戏原型，并用真实浏览器覆盖核心交互验收。",
+      "description": "适合从游戏想法快速落到可运行的网页闭环，覆盖核心循环、输入、胜负、重启与移动端检查。",
+      "skills": ["game-loop-design", "browser-game-prototype", "browser-game-playtest"],
+      "accent": "green",
+      "status": "可上岗"
+    },
+    {
+      "id": "math-modeling-researcher",
+      "name": "Math Modeling Researcher",
+      "role": "数学建模研究员",
+      "summary": "把公开资料、数据和现实问题整理成可复核的数学模型与决策报告。",
+      "description": "适合竞赛题、工程评估和研究型问题。先核验来源与假设，再建立基线模型，记录计算过程，做验证和敏感性分析，最后输出带边界的研究结论。",
+      "skills": ["math-modeling-method", "web-knowledge-extractor", "multi-source-fusion", "skill-release-review"],
+      "accent": "violet",
+      "status": "可上岗"
+    }
+  ]
+}

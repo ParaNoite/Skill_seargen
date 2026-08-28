@@ -361,7 +361,7 @@ runs/<run-id>/
 {
   "providers": {
     "newapi": {
-      "base_url": "https://api.renice.cc/v1",
+      "base_url": "https://api.example.test/v1",
       "api_key_env": "NEWAPI_API_KEY",
       "vision_model": "...",
       "asr_model": "...",

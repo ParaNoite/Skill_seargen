@@ -8,8 +8,8 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from skill_gather.config import NewApiConfig
-from skill_gather.integrations.newapi import NewApiClient, NewApiError
+from skill_gather.config import NewApiConfig, NewApiRequestProfile
+from skill_gather.integrations.newapi import NewApiClient, NewApiError, _compact_evidence_timeline
 
 
 class FakeResponse:
@@ -29,6 +29,55 @@ class FakeResponse:
 
 
 class NewApiClientTests(unittest.TestCase):
+    def test_distill_course_keeps_only_existing_evidence_references(self):
+        client = NewApiClient(base_url="https://api.example.test/v1", api_key="secret-key")
+        response = {
+            "title": "导航入门",
+            "learning_outcomes": ["理解导航"],
+            "overview": "从路径开始。",
+            "lessons": [{"heading": "路径", "content": "先设置目标。", "evidence_refs": ["S1:sentence:1", "invented:ref"]}],
+            "pitfalls": ["不要猜测 API"],
+            "exercises": ["完成最小示例"],
+            "next_steps": ["阅读官方文档"],
+        }
+        fusion = {"conclusions": [{"claim": "设置目标", "citations": [{"source_id": "S1", "locator": "sentence:1"}]}]}
+        with patch.object(NewApiClient, "_post_chat_completion_content", return_value=json.dumps(response)):
+            course = client.distill_course("Godot 导航", "technical", fusion, "text-model")
+
+        self.assertEqual(course["lessons"][0]["evidence_refs"], ["S1:sentence:1"])
+
+    def test_distill_course_prioritizes_actionable_github_evidence_over_video_chrome(self):
+        client = NewApiClient(base_url="https://api.example.test/v1", api_key="secret-key")
+        response = {
+            "title": "Three.js 跑酷",
+            "learning_outcomes": ["理解启动流程"],
+            "overview": "从可执行证据开始。",
+            "lessons": [{"heading": "验证", "content": "先运行测试。", "evidence_refs": ["G1:commands:README.md"]}],
+            "pitfalls": [],
+            "exercises": [],
+            "next_steps": [],
+        }
+        video_items = [
+            {
+                "claim": f"The browser tab title shows Vite App and the system clock shows 10:{index:02d}.",
+                "supporting_source_count": 1,
+                "confidence": 0.99,
+                "citations": [{"source_id": "V1", "locator": f"00:00:{index:02d}", "source_type": "video"}],
+            }
+            for index in range(20)
+        ]
+        github_item = {
+            "claim": "Run `npm run test:run` to verify the Three.js runner before release.",
+            "supporting_source_count": 1,
+            "confidence": 0.8,
+            "citations": [{"source_id": "G1", "locator": "commands:README.md", "source_type": "github"}],
+        }
+        with patch.object(NewApiClient, "_post_chat_completion_content", return_value=json.dumps(response)) as post:
+            client.distill_course("Three.js 浏览器 3D 跑酷", "technical", {"conclusions": video_items + [github_item]}, "text-model")
+
+        prompt = post.call_args.args[0]["messages"][0]["content"]
+        self.assertIn("npm run test:run", prompt)
+
     def test_probe_model_marks_catalogued_but_unknown_model_unavailable(self):
         error = urllib.error.HTTPError(
             "https://api.example.test/v1/chat/completions",
@@ -49,9 +98,14 @@ class NewApiClientTests(unittest.TestCase):
         self.assertEqual(result["status_code"], 404)
 
     def test_probe_model_uses_inline_image_for_vision(self):
+        vision_response = json.dumps({
+            "observations": [
+                {"type": "dominant_color", "claim": "red", "raw_excerpt": "", "confidence": 1.0}
+            ]
+        })
         with patch(
             "skill_gather.integrations.newapi.urllib.request.urlopen",
-            return_value=FakeResponse({"choices": [{"message": {"content": "red"}}]}),
+            return_value=FakeResponse({"choices": [{"message": {"content": vision_response}}]}),
         ) as urlopen:
             result = NewApiClient(
                 base_url="https://api.example.test/v1",
@@ -61,6 +115,8 @@ class NewApiClientTests(unittest.TestCase):
         body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
         self.assertTrue(result["available"])
         self.assertEqual(body["messages"][0]["content"][1]["type"], "image_url")
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertGreaterEqual(body["max_tokens"], 64)
 
     def test_probe_model_rejects_text_only_response_to_vision_prompt(self):
         with patch(
@@ -80,13 +136,14 @@ class NewApiClientTests(unittest.TestCase):
             NewApiClient,
             "_post_chat_completion_content",
             side_effect=[
-                json.dumps({"goal": "Godot 导航", "facets": ["NavigationAgent"], "exclusions": ["付费课程"], "queries": ["Godot NavigationAgent 教程"]}),
+                json.dumps({"goal": ["Godot 导航"], "facets": ["NavigationAgent"], "exclusions": ["付费课程"], "queries": ["Godot NavigationAgent 教程"]}),
                 json.dumps({"assessments": [{"candidate_id": "cand-1", "relevance": 120, "matched_facets": ["NavigationAgent"], "reason": "标题直接匹配", "risk_flags": []}]}),
             ],
         ):
             intent = client.build_search_intent("Godot 导航", "technical", "text-model")
             assessments = client.assess_search_candidates(intent, [{"candidate_id": "cand-1", "title": "Godot NavigationAgent", "summary": "", "source_type": "video"}], "text-model")
 
+        self.assertEqual(intent["goal"], "Godot 导航")
         self.assertEqual(intent["queries"], ["Godot NavigationAgent 教程"])
         self.assertEqual(assessments["cand-1"]["relevance"], 100)
 
@@ -103,21 +160,60 @@ class NewApiClientTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(NewApiClient.from_config(config))
 
-    def test_from_config_accepts_literal_api_key_for_local_testing(self):
+    def test_from_config_rejects_literal_api_key(self):
         config = NewApiConfig(
             base_url="https://api.example.test/v1",
-            api_key_env="sk-test-literal-key",
+            api_key_env="sk_test_fixture",
             vision_model="vision",
             asr_model="asr",
             distiller_model="distiller",
             judge_model="judge",
+            timeout_sec=240,
+            request_profiles={
+                "vision": NewApiRequestProfile(temperature=0.0, max_tokens=1200)
+            },
         )
 
         with patch.dict(os.environ, {}, clear=True):
             client = NewApiClient.from_config(config)
 
-        self.assertIsNotNone(client)
-        self.assertEqual(client.api_key, "sk-test-literal-key")
+        self.assertIsNone(client)
+
+    def test_chat_completion_applies_stage_request_profile(self):
+        with patch(
+            "skill_gather.integrations.newapi.urllib.request.urlopen",
+            return_value=FakeResponse(
+                {"choices": [{"message": {"content": '{"observations":[]}'}}]}
+            ),
+        ) as urlopen:
+            NewApiClient(
+                base_url="https://api.example.test/v1/",
+                api_key="secret-key",
+                request_profiles={
+                    "vision": NewApiRequestProfile(
+                        temperature=0.0,
+                        top_p=0.9,
+                        max_tokens=1200,
+                        reasoning_effort="medium",
+                    )
+                },
+            )._post_chat_completion_content(
+                {
+                    "model": "vision-model",
+                    "messages": [{"role": "user", "content": "json"}],
+                    "max_tokens": 128,
+                },
+                operation="vision",
+                http_error_code="vision_failed",
+                unreachable_code="vision_unreachable",
+                profile="vision",
+            )
+
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(payload["temperature"], 0.0)
+        self.assertEqual(payload["top_p"], 0.9)
+        self.assertEqual(payload["max_tokens"], 1200)
+        self.assertEqual(payload["reasoning_effort"], "medium")
 
     def test_transcribe_audio_posts_multipart_request(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -506,8 +602,176 @@ class NewApiClientTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         body = json.loads(request.data.decode("utf-8"))
         prompt = body["messages"][0]["content"]
-        self.assertIn('"omitted_item_count": 2', prompt)
+        self.assertIn('"omitted_item_count": 3', prompt)
         self.assertNotIn("x" * 500, prompt)
+
+    def test_compact_evidence_removes_near_duplicates_and_keeps_temporal_edges(self):
+        evidence = {
+            "video_duration_sec": 60,
+            "frame_budget": 8,
+            "sampling_strategy": "ffmpeg_interval_10s",
+            "items": [
+                {
+                    "timestamp": "00:00:02",
+                    "type": "asr",
+                    "claim": "先打开项目设置。",
+                    "raw_excerpt": "先打开项目设置。",
+                    "confidence": 0.7,
+                },
+                {
+                    "timestamp": "00:00:04",
+                    "type": "asr",
+                    "claim": "先打开项目设置。",
+                    "raw_excerpt": "先打开项目设置。",
+                    "confidence": 0.7,
+                },
+                {
+                    "timestamp": "00:00:06",
+                    "type": "frame_ocr",
+                    "claim": "先打开项目设置。",
+                    "raw_excerpt": "Project Settings",
+                    "confidence": 0.8,
+                },
+                {
+                    "timestamp": "00:00:52",
+                    "type": "workflow_step",
+                    "claim": "最后运行最小验证。",
+                    "raw_excerpt": "Run the smoke test",
+                    "confidence": 0.9,
+                },
+            ],
+        }
+
+        with patch.dict(os.environ, {"SKILL_GATHER_DISTILL_EVIDENCE_LIMIT": "3"}):
+            compact = _compact_evidence_timeline(evidence)
+
+        claims = [item["claim"] for item in compact["items"]]
+        self.assertEqual(len(compact["items"]), 2)
+        self.assertEqual(claims[0], "先打开项目设置。")
+        self.assertEqual(claims[-1], "最后运行最小验证。")
+        self.assertEqual(compact["omitted_item_count"], 2)
+
+    def test_compact_evidence_prioritizes_visual_item_near_transcript_cue(self):
+        evidence = {
+            "video_duration_sec": 40,
+            "items": [
+                {
+                    "timestamp": "00:00:05",
+                    "type": "asr",
+                    "claim": "注意这里，接下来执行安装命令。",
+                    "raw_excerpt": "注意这里，接下来执行安装命令。",
+                    "confidence": 0.7,
+                },
+                {
+                    "timestamp": "00:00:08",
+                    "type": "frame_ocr",
+                    "claim": "终端显示安装命令。",
+                    "raw_excerpt": "python -m pip install -e .",
+                    "confidence": 0.9,
+                },
+                {
+                    "timestamp": "00:00:30",
+                    "type": "metadata_title",
+                    "claim": "视频标题说明主题：安装教程",
+                    "raw_excerpt": "安装教程",
+                    "confidence": 0.45,
+                },
+                {
+                    "timestamp": "00:00:36",
+                    "type": "example",
+                    "claim": "示例完成。",
+                    "raw_excerpt": "done",
+                    "confidence": 0.8,
+                },
+            ],
+        }
+
+        with patch.dict(os.environ, {"SKILL_GATHER_DISTILL_EVIDENCE_LIMIT": "3"}):
+            compact = _compact_evidence_timeline(evidence)
+
+        claims = [item["claim"] for item in compact["items"]]
+        self.assertIn("注意这里，接下来执行安装命令。", claims)
+        self.assertIn("终端显示安装命令。", claims)
+        self.assertNotIn("视频标题说明主题：安装教程", claims)
+
+    def test_compact_evidence_protects_cue_pair_when_budget_is_tight(self):
+        evidence = {
+            "video_duration_sec": 102,
+            "items": [
+                {
+                    "timestamp": "00:00:00",
+                    "type": "asr",
+                    "claim": "Notice this command and run it next.",
+                    "raw_excerpt": "Notice this command and run it next.",
+                    "confidence": 0.7,
+                },
+                {
+                    "timestamp": "00:00:01",
+                    "type": "frame_ocr",
+                    "claim": "The terminal shows the install command.",
+                    "raw_excerpt": "python -m pip install -e .",
+                    "confidence": 0.9,
+                },
+                {
+                    "timestamp": "00:01:40",
+                    "type": "workflow_step",
+                    "claim": "The workflow reaches its final step.",
+                    "raw_excerpt": "final step",
+                    "confidence": 0.9,
+                },
+                {
+                    "timestamp": "00:01:41",
+                    "type": "example",
+                    "claim": "The final example completes.",
+                    "raw_excerpt": "done",
+                    "confidence": 0.8,
+                },
+            ],
+        }
+
+        with patch.dict(os.environ, {"SKILL_GATHER_DISTILL_EVIDENCE_LIMIT": "2"}):
+            compact = _compact_evidence_timeline(evidence)
+
+        self.assertEqual(
+            [item["type"] for item in compact["items"]],
+            ["asr", "frame_ocr"],
+        )
+
+    def test_compact_evidence_keeps_distinct_commands_with_same_visual_claim(self):
+        evidence = {
+            "video_duration_sec": 20,
+            "items": [
+                {
+                    "timestamp": "00:00:02",
+                    "type": "code_command",
+                    "claim": "The terminal displays the command.",
+                    "raw_excerpt": "pip install foo",
+                    "confidence": 0.9,
+                },
+                {
+                    "timestamp": "00:00:06",
+                    "type": "code_command",
+                    "claim": "The terminal displays the command.",
+                    "raw_excerpt": "pip install bar",
+                    "confidence": 0.9,
+                },
+                {
+                    "timestamp": "00:00:18",
+                    "type": "workflow_step",
+                    "claim": "Run the verification step.",
+                    "raw_excerpt": "run test",
+                    "confidence": 0.8,
+                },
+            ],
+        }
+
+        with patch.dict(os.environ, {"SKILL_GATHER_DISTILL_EVIDENCE_LIMIT": "3"}):
+            compact = _compact_evidence_timeline(evidence)
+
+        self.assertEqual(
+            [item["raw_excerpt"] for item in compact["items"]],
+            ["pip install foo", "pip install bar", "run test"],
+        )
 
     def test_distill_skill_omits_manifest_risk_flags_from_prompt(self):
         with patch(

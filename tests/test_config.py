@@ -6,7 +6,7 @@ from skill_gather.config import ConfigError, parse_config
 VALID_CONFIG = {
     "providers": {
         "newapi": {
-            "base_url": "https://api.renice.cc/v1",
+            "base_url": "https://api.example.test/v1",
             "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             "vision_model": "vision",
             "asr_model": "faster-whisper:base",
@@ -29,6 +29,58 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.provider, "newapi")
         self.assertEqual(config.newapi.vision_model, "vision")
         self.assertEqual(config.newapi.asr_model, "faster-whisper:base")
+        self.assertEqual(config.newapi.timeout_sec, 180)
+        self.assertEqual(config.newapi.request_profiles, {})
+
+    def test_parses_newapi_timeout_and_request_profiles(self):
+        raw = {
+            **VALID_CONFIG,
+            "providers": {
+                "newapi": {
+                    **VALID_CONFIG["providers"]["newapi"],
+                    "timeout_sec": 240,
+                    "request_profiles": {
+                        "vision": {
+                            "temperature": 0,
+                            "top_p": 0.9,
+                            "max_tokens": 1200,
+                        },
+                        "judge": {
+                            "temperature": 0.0,
+                            "max_completion_tokens": 900,
+                            "reasoning_effort": "medium",
+                        },
+                    },
+                }
+            },
+        }
+
+        config = parse_config(raw)
+
+        self.assertEqual(config.newapi.timeout_sec, 240)
+        self.assertEqual(config.newapi.request_profiles["vision"].temperature, 0.0)
+        self.assertEqual(config.newapi.request_profiles["vision"].top_p, 0.9)
+        self.assertEqual(config.newapi.request_profiles["vision"].max_tokens, 1200)
+        self.assertEqual(config.newapi.request_profiles["judge"].max_completion_tokens, 900)
+        self.assertEqual(config.newapi.request_profiles["judge"].reasoning_effort, "medium")
+
+    def test_rejects_invalid_newapi_request_profile(self):
+        raw = {
+            **VALID_CONFIG,
+            "providers": {
+                "newapi": {
+                    **VALID_CONFIG["providers"]["newapi"],
+                    "request_profiles": {
+                        "vision": {
+                            "temperature": 3.0,
+                        }
+                    },
+                }
+            },
+        }
+
+        with self.assertRaises(ConfigError):
+            parse_config(raw)
 
     def test_rejects_missing_asr_model(self):
         raw = {
@@ -65,7 +117,7 @@ class ConfigTests(unittest.TestCase):
         raw = dict(VALID_CONFIG)
         raw["providers"] = {
             "newapi": {
-                "base_url": "https://api.renice.cc/v1",
+                "base_url": "https://api.example.test/v1",
                 "api_key_env": "SKILL_GATHER_TEST_NEWAPI_API_KEY",
             }
         }

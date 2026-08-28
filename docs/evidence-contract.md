@@ -12,7 +12,7 @@
 | `RunState` | 阶段状态、已完成阶段、失败原因和 artifact 路径 |
 | `SkillPackageMetadata` | skill 候选状态、模型配置、证据摘要、评分和风险 |
 | `TopicTask` | 主题、普通/技术模式、预算、用量、缓存、来源选择、视频子 run、状态、失败审计和主题包索引 |
-| `TopicPackage` | 主题包中 `sources.json`、`evidence/`、`references/` 及未来文档产物的相对路径 |
+| `TopicPackage` | 主题包中 `sources.json`、`evidence/`、`references/`、`COURSE.md`、`knowledge.md`、可选 `SKILL.md` 和评分的相对路径 |
 
 ## v0.4 搜索候选契约
 
@@ -54,7 +54,23 @@
 - 匿名 GitHub API 限流时，可改从公开 raw 地址读取 `main/master` 分支的 README；该 evidence 必须标记 `github_api_rate_limit_fallback`、`github_file_selection_truncated`，并在 limitations 中说明只读取了 README。
 - GitHub-only 技术主题可凭 GitHub 证据完成来源处理阶段。网页、视频和 GitHub 的统一结论融合不属于 v0.7。
 
+## 当前 Generate 产物契约
+
+- 普通模式和技术模式都必须生成 `topic_package/COURSE.md`。它是面向学习者的主要成果，至少包含学习目标、课程导览、教学单元、常见误区或边界、自测或实践，以及可定位证据引用。
+- 配置文本模型时，教学蒸馏输入只能来自 `fusion.json` 中已保存的结论和引用。课程中的引用必须匹配已有 `source_id:locator`，不得由模型发明。
+- 教学模型不可用、超时或输出结构不合规时，生成器可退回确定性证据提纲，但必须在正文和 `course_audit.json` 中明确标记降级原因，不得冒充完整课程。
+- `knowledge.md` 是审核文档，保留关键结论、冲突、证据缺口、来源质量、风险和引用说明；它不再承担主要教学正文职责。
+- 技术模式在课程和审核文档之外生成 `SKILL.md` 与 `score.json`。评分的 documentation 维度必须检查课程、审核文档和 reference 索引，而不能只检查 Skill 文件存在。
+- Web 结果 API 对主题返回 `course`、`knowledge`、可选 `skill`、`score` 和 `fusion`；结果页优先展示课程，技术模式随后展示 AI Skill。
+
 ## 通用规则
+
+## 监工展示证据契约
+
+- Playwright 流程必须保留 Trace；截图只在事件驱动的稳定页面状态登记，不按时间连续连拍。
+- `bug_reproduction` 和 `bug_fixed` 只能作为内部诊断证据，不能进入 `capture-index.md` 或 `showcase.html`。
+- 展示帧最多 5 张，必须带叙事节点、评分、理由和关联产物；低于展示阈值或证据不足时保持未选中。
+- `showcase.html` 和 `capture-index.md` 只能引用相对路径，脱离开发服务器也必须能打开；展示副本不得含 token、cookie、Authorization 或查询参数。
 
 - 时间必须能追溯到视频时间戳。
 - 证据必须带来源类型和置信度。

@@ -55,6 +55,35 @@ class TechnicalSkillTests(unittest.TestCase):
             self.assertEqual(set(score["dimensions"]), {"documentation", "skill", "evidence", "executability", "boundaries"})
             self.assertEqual(read_json(score_path)["final_status"], "passed")
 
+    def test_reference_index_links_generated_markdown_reference(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TopicRunStore(Path(temp_dir) / "runs")
+            task = store.start_or_resume("Godot 4 TileMapLayer", mode="technical")
+            root = store.run_path(task.run_id)
+            references = root / "topic_package/references"
+            references.mkdir(parents=True, exist_ok=True)
+            (references / "github-cand-demo.md").write_text("# Demo\n", encoding="utf-8")
+            fusion = {
+                "source_summary": [
+                    {
+                        "source_id": "G1",
+                        "candidate_id": "cand-demo",
+                        "title": "Godot demo",
+                        "url": "https://github.com/example/demo",
+                    }
+                ],
+                "conclusions": [],
+                "conflicts": [],
+                "evidence_gaps": [],
+                "risk_flags": [],
+            }
+
+            generate_technical_skill(task, root, fusion)
+
+            reference_index = (references / "index.md").read_text(encoding="utf-8")
+            self.assertIn("[Godot demo](github-cand-demo.md)", reference_index)
+            self.assertNotIn("local reference unavailable", reference_index)
+
     def test_human_review_updates_status_without_rewriting_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             score_path = Path(temp_dir) / "score.json"
@@ -164,6 +193,13 @@ class TechnicalSkillTests(unittest.TestCase):
         self.assertFalse(_is_procedural_claim("if (status == ResourceLoader.ThreadLoadStatus.Failed)"))
         self.assertFalse(_is_procedural_claim('You call load_threaded_request("res://world.tscn") and wait.'))
         self.assertFalse(_is_procedural_claim("使用 NavigationAgent avoidance_enabled 属性是切换避障的首选选项。"))
+        self.assertFalse(
+            _is_procedural_claim(
+                "实现下来的一个收获吧，就是我对 Canvas 的理解更上一层楼了，所以说代码还是得多写，"
+                "同时这个小 demo 经过了三次重构，我也知道小游戏开发和页面开发有天然之别，"
+                "后续如果有兴趣的小伙伴可以给我提个 PR 一起学习。"
+            )
+        )
         self.assertTrue(
             _is_procedural_claim(
                 "To use avoidance, call set_velocity() and move_and_slide() each frame."

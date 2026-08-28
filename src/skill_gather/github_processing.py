@@ -144,8 +144,8 @@ def fetch_public_github_repository(
     url: str,
     *,
     timeout_sec: int = 15,
-    max_files: int = 12,
-    max_bytes: int = 24_000,
+    max_files: int = 24,
+    max_bytes: int = 48_000,
     token_env: str = "GITHUB_TOKEN",
 ) -> GitHubRepositorySnapshot:
     owner, repo = parse_github_repo(url)
@@ -387,6 +387,19 @@ def _is_interesting_path(path: str) -> bool:
         return True
     if lower.startswith(("docs/", "examples/", "example/", ".github/")) and suffix in _TEXT_EXTENSIONS:
         return True
+    if suffix in {".js", ".mjs", ".ts", ".tsx", ".html"}:
+        roots = (
+            "src/", "app/", "public/", "game/", "games/", "js/", "scripts/",
+            "lib/", "components/", "client/", "engine/", "source/",
+        )
+        if lower.startswith(roots) or "/" not in lower:
+            markers = (
+                "camera", "collision", "control", "game", "input", "main", "player",
+                "runner", "scene", "state", "world", "index", "app", "resize",
+                "touch", "pointer", "mobile", "keyboard", "event", "loop", "manager",
+            )
+            if any(marker in lower for marker in markers):
+                return True
     if lower.startswith(("src/", "app/", "skill_gather/")) and name in {"cli.py", "__main__.py", "main.py", "index.ts", "index.js"}:
         return True
     return False
@@ -414,8 +427,12 @@ def _signals_for_file(path: str, text: str) -> dict[str, list[str]]:
     lower_path = path.lower()
     patterns = {
         "installation": ("install", "pip install", "npm install", "安装", "依赖"),
-        "commands": ("python -m", "npm run", "cargo ", "godot", "命令", "```"),
-        "api": ("api", "class ", "def ", "function ", "接口", "参数"),
+        "commands": ("python -m", "npm run", "cargo ", "godot", "命令", "```", "npm start"),
+        "api": (
+            "api", "class ", "def ", "function ", "接口", "参数", "requestanimationframe",
+            "addeventlistener", "intersectsbox", "box3", "touchstart", "touchmove",
+            "keydown", "keyup", "gameover", "restart", "resetgame",
+        ),
         "examples": ("example", "examples", "示例", "用法", "usage"),
         "configuration": ("config", "配置", ".env", "settings", "选项"),
         "constraints": ("warning", "注意", "requires", "token", "cookie", "限制", "private"),
@@ -426,11 +443,26 @@ def _signals_for_file(path: str, text: str) -> dict[str, list[str]]:
     for key, needles in patterns.items():
         if key == "skill_materials" and any(name in lower_path for name in ("skill.md", "agents.md", "claude.md")):
             signals[key].append(f"文件路径显示已有 skill/Agent 材料：{path}")
-        for line in lines:
+        ordered_lines = lines
+        if key == "api":
+            target_needles = (
+                "touch", "pointer", "resize", "collision", "aabb", "box3", "intersect",
+                "gameover", "game over", "restart", "reset", "keydown", "keyup",
+                "requestanimationframe", "addeventlistener", "ontouch",
+            )
+            ordered_lines = sorted(
+                enumerate(lines),
+                key=lambda item: (
+                    0 if any(needle in item[1].lower() for needle in target_needles) else 1,
+                    item[0],
+                ),
+            )
+            ordered_lines = [line for _index, line in ordered_lines]
+        for line in ordered_lines:
             haystack = line.lower()
             if len(line) >= 6 and any(needle in haystack for needle in needles):
                 signals[key].append(_excerpt(line, 180))
-            if len(signals[key]) >= 3:
+            if len(signals[key]) >= (12 if key == "api" else 5):
                 break
     return signals
 

@@ -3,7 +3,7 @@ const stageNames = {
   manifest: "元数据", media_extract: "媒体", frame_extract: "抽帧", asr: "ASR",
   vision_ocr: "视觉", timeline_merge: "证据合并", distill: "蒸馏", score: "评分", package: "打包"
 };
-const statusNames = { created: "排队中", running: "处理中", paused: "已暂停", completed: "已完成", failed: "失败", passed: "通过", needs_review: "待复核" };
+const statusNames = { created: "排队中", running: "处理中", paused: "已暂停", completed: "已完成", failed: "失败", passed: "通过", needs_attention: "需要关注", warning: "警告", needs_review: "待复核" };
 const difficultyNames = { lenient: "宽松", standard: "标准", strict: "严格", off: "关闭 Judge" };
 const RUN_POLL_STATUSES = new Set(["created", "running"]);
 const TOPIC_POLL_STATUSES = new Set(["awaiting_plan_confirmation", "processing_sources", "generating", "scoring"]);
@@ -25,9 +25,53 @@ const formMessage = document.querySelector("#form-message");
 const submitButton = document.querySelector("#submit-button");
 const modelsButton = document.querySelector("#models-button");
 const modelsPanel = document.querySelector("#models-panel");
+const operationProgress = document.querySelector("#operation-progress");
+const operationTitle = document.querySelector("#operation-title");
+const operationDetail = document.querySelector("#operation-detail");
+const operationMeterFill = document.querySelector("#operation-meter-fill");
+const operationTime = document.querySelector("#operation-time");
+const artifactPreview = document.querySelector("#artifact-preview");
+const artifactPreviewTitle = document.querySelector("#artifact-preview-title");
+const artifactPreviewMeta = document.querySelector("#artifact-preview-meta");
+const artifactPreviewTabs = document.querySelector("#artifact-preview-tabs");
+const artifactPreviewContent = document.querySelector("#artifact-preview-content");
+const artifactDownloadCourse = document.querySelector("#artifact-download-course");
+const artifactDownloadSkill = document.querySelector("#artifact-download-skill");
+let operationStartedAt = 0;
+let operationTimer = null;
+let activeArtifact = null;
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+}
+
+function setOperation({ status = "running", title = "处理中", detail = "", progress = 12 } = {}) {
+  if (!operationProgress) return;
+  const wasIdle = operationProgress.classList.contains("idle") || operationProgress.classList.contains("finished") || operationProgress.classList.contains("failed");
+  if (!operationStartedAt || (status === "running" && wasIdle)) operationStartedAt = Date.now();
+  operationProgress.className = `operation-progress ${escapeHtml(status)}`;
+  operationTitle.textContent = title;
+  operationDetail.textContent = detail;
+  operationMeterFill.style.width = `${Math.max(0, Math.min(100, Number(progress) || 0))}%`;
+  const renderTime = () => { operationTime.textContent = `${Math.max(0, Math.round((Date.now() - operationStartedAt) / 1000))}s`; };
+  renderTime();
+  if (status === "running" && !operationTimer) operationTimer = window.setInterval(renderTime, 1000);
+  if (status !== "running" && operationTimer) {
+    window.clearInterval(operationTimer);
+    operationTimer = null;
+  }
+}
+
+function finishOperation(title, detail = "") {
+  setOperation({ status: "finished", title, detail, progress: 100 });
+  window.setTimeout(() => {
+    operationProgress?.classList.add("idle");
+    operationStartedAt = 0;
+  }, 2200);
+}
+
+function failOperation(title, detail = "") {
+  setOperation({ status: "failed", title, detail, progress: 100 });
 }
 
 function setView(view) {
@@ -59,8 +103,8 @@ async function loadResults() {
     const params = new URLSearchParams({ type: document.querySelector("#results-type")?.value || "all", status: document.querySelector("#results-status")?.value || "all", min_score: document.querySelector("#results-score")?.value || "0", risk: document.querySelector("#results-risk")?.value || "", source: document.querySelector("#results-source")?.value || "" });
     const data = await request(`/api/results?${params}`);
     visibleResults = data.results || [];
-    target.innerHTML = visibleResults.length ? visibleResults.map(item => `<div class="run-item"><div class="run-top"><label><input type="checkbox" data-result-id="${escapeHtml(item.run_id)}"> <span class="run-meta">${escapeHtml(item.kind)}</span></label>${statusBadge(item.result_status)}</div><button class="result-read" type="button" data-read-id="${escapeHtml(item.run_id)}">${escapeHtml(item.title || item.topic || item.run_id)}</button><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div><div class="run-meta">${escapeHtml(Object.values(item.artifacts || {}).filter(Boolean).join(" · "))}</div></div>`).join("") : '<div class="loading">暂无匹配结果。</div>';
-    target.querySelectorAll("[data-read-id]").forEach(button => button.addEventListener("click", async () => renderResultDetails([await request(`/api/results/${encodeURIComponent(button.dataset.readId)}`)])));
+    target.innerHTML = visibleResults.length ? visibleResults.map(item => `<div class="run-item"><div class="run-top"><label><input type="checkbox" data-result-id="${escapeHtml(item.run_id)}"> <span class="run-meta">${escapeHtml(item.kind)}</span></label>${statusBadge(item.result_status)}</div><button class="result-read" type="button" data-read-id="${escapeHtml(item.run_id)}">${escapeHtml(item.title || item.topic || item.run_id)}</button><div class="run-meta">评分 ${Number(item.score) || 0} · 风险 ${(item.risk_flags || []).length}</div><div class="run-meta">${escapeHtml(Object.values(item.artifacts || {}).filter(Boolean).join(" · "))}</div><button class="button secondary result-preview-action" type="button" data-preview-id="${escapeHtml(item.run_id)}">预览产物</button></div>`).join("") : '<div class="loading">暂无匹配结果。</div>';
+    target.querySelectorAll("[data-read-id], [data-preview-id]").forEach(button => button.addEventListener("click", async () => openArtifactPreview(await request(`/api/results/${encodeURIComponent(button.dataset.readId || button.dataset.previewId)}`))));
   } catch (error) { target.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`; }
 }
 
@@ -69,10 +113,160 @@ document.querySelectorAll(".workspace-tabs .nav-tab").forEach(tab => tab.addEven
 document.querySelector("#metrics-refresh")?.addEventListener("click", loadMetrics);
 ["#results-type", "#results-status", "#results-score", "#results-risk", "#results-source"].forEach(selector => document.querySelector(selector)?.addEventListener("change", loadResults));
 function selectedResultIds() { return [...document.querySelectorAll("[data-result-id]:checked")].map(item => item.dataset.resultId); }
-function renderResultDetails(items) {
-  const target = document.querySelector("#results-detail");
-  target.innerHTML = items.map(item => `<article class="result-document"><h2>${escapeHtml(item.title)}</h2><div class="run-meta">${escapeHtml(item.kind)} · ${escapeHtml(item.score?.final_status || "")}</div><pre>${escapeHtml(item.skill || item.knowledge || JSON.stringify(item.evidence || item.fusion || {}, null, 2))}</pre></article>`).join("");
+function renderReadiness(result) {
+  const panel = document.querySelector("#readiness-panel");
+  const statusLabel = { passed: "全部通过", needs_attention: "需要关注", failed: "未开通完整功能" }[result.status] || result.status;
+  const checks = result.checks || [];
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div class="readiness-head">
+      <div><p class="eyebrow">REAL READINESS</p><h2>${escapeHtml(statusLabel)}</h2></div>
+      ${statusBadge(result.status)}
+    </div>
+    <div class="readiness-summary">
+      <span>通过 ${Number(result.summary?.passed) || 0}</span>
+      <span>关注 ${Number(result.summary?.warning) || 0}</span>
+      <span>失败 ${Number(result.summary?.failed) || 0}</span>
+    </div>
+    <div class="readiness-current">${escapeHtml(result.current || (result.status === "running" ? "正在检查..." : ""))}</div>
+    <div class="readiness-grid">${checks.map(check => `
+      <article class="readiness-item ${escapeHtml(check.status)}">
+        <div class="run-top"><strong>${escapeHtml(check.label)}</strong>${statusBadge(check.status)}</div>
+        <div class="run-meta">${escapeHtml(check.group)} · ${escapeHtml(check.summary || "")}</div>
+        ${check.model ? `<div class="run-meta">模型 ${escapeHtml(check.model)}</div>` : ""}
+        ${check.engine ? `<div class="run-meta">引擎 ${escapeHtml(check.engine)}</div>` : ""}
+        ${check.error_code ? `<div class="run-meta">错误码 ${escapeHtml(check.error_code)}</div>` : ""}
+      </article>
+    `).join("")}</div>
+    <div class="notice">${(result.notes || []).map(escapeHtml).join("<br>")}</div>`;
 }
+
+function renderReadinessJob(job) {
+  const total = Number(job.total) || 0;
+  const index = Number(job.index) || 0;
+  const progress = Number(job.progress) || (total ? Math.round(index / total * 100) : 4);
+  setOperation({
+    status: job.status === "failed" ? "failed" : job.active ? "running" : "finished",
+    title: "真实功能检查",
+    detail: job.error || (job.current ? `${job.current}（${index}/${total}）` : "正在准备检查项"),
+    progress,
+  });
+  renderReadiness({
+    status: job.result?.status || (job.active ? "running" : "failed"),
+    checks: job.checks || [],
+    summary: job.result?.summary || {
+      passed: (job.checks || []).filter(check => check.status === "passed").length,
+      warning: (job.checks || []).filter(check => check.status === "warning").length,
+      failed: (job.checks || []).filter(check => check.status === "failed").length,
+    },
+    current: job.current ? `当前进度：${job.current}（${index}/${total}）` : "正在准备检查项",
+    notes: job.result?.notes || ["真实功能检查正在后台执行，完成后会显示最终状态。"],
+  });
+}
+
+async function pollReadinessJob(jobId) {
+  const job = await request(`/api/readiness-check/${encodeURIComponent(jobId)}`);
+  renderReadinessJob(job);
+  if (job.active) {
+    await new Promise(resolve => window.setTimeout(resolve, 400));
+    return pollReadinessJob(jobId);
+  }
+  if (job.status === "finished") {
+    finishOperation("真实功能检查完成", job.result?.status === "passed" ? "全部检查通过" : "请查看分项结果");
+    if (job.result) renderReadiness(job.result);
+  } else {
+    failOperation("真实功能检查失败", job.error || "请查看错误信息");
+  }
+  return job;
+}
+
+function updateRunOperation(run) {
+  if (!run || !RUN_POLL_STATUSES.has(run.status)) return;
+  setOperation({
+    status: "running",
+    title: "视频处理进行中",
+    detail: `${stageNames[run.current_stage] || run.current_stage} · ${run.progress || 0}%`,
+    progress: run.progress || 4,
+  });
+}
+
+function updateTopicOperation(topic) {
+  if (!topic || !TOPIC_POLL_STATUSES.has(topic.status)) return;
+  const stageLabels = {
+    awaiting_plan_confirmation: "等待语义确认",
+    processing_sources: "处理已选来源",
+    generating: "生成课程和 Skill",
+    scoring: "评分与发布门槛",
+  };
+  setOperation({
+    status: "running",
+    title: "主题任务进行中",
+    detail: stageLabels[topic.status] || topic.current_stage || topic.status,
+    progress: topic.status === "awaiting_plan_confirmation" ? 18 : topic.status === "processing_sources" ? 42 : topic.status === "generating" ? 72 : 88,
+  });
+}
+
+function renderResultDetails(items) {
+  if (items.length === 1) {
+    openArtifactPreview(items[0]);
+    return;
+  }
+  const target = document.querySelector("#results-detail");
+  target.innerHTML = items.map(item => {
+    const course = item.course ? `<h3>人类课程</h3><pre>${escapeHtml(item.course)}</pre>` : "";
+    const skill = item.skill ? `<h3>AI Skill</h3><pre>${escapeHtml(item.skill)}</pre>` : "";
+    const fallback = !course && !skill ? `<pre>${escapeHtml(item.knowledge || JSON.stringify(item.evidence || item.fusion || {}, null, 2))}</pre>` : "";
+    return `<article class="result-document"><h2>${escapeHtml(item.title)}</h2><div class="run-meta">${escapeHtml(item.kind)} · ${escapeHtml(item.score?.final_status || "")}</div>${course}${skill}${fallback}</article>`;
+  }).join("");
+}
+
+function artifactDownloadUrl(runId, kind) {
+  return `/api/results/${encodeURIComponent(runId)}/download/${kind}`;
+}
+
+function setArtifactPreviewMode(mode) {
+  if (!activeArtifact || !artifactPreviewContent) return;
+  const hasCourse = Boolean(activeArtifact.course);
+  const hasSkill = Boolean(activeArtifact.skill);
+  const hasPreviewTabs = hasCourse || hasSkill;
+  const actualMode = mode === "course" && hasCourse ? "course" : mode === "skill" && hasSkill ? "skill" : hasCourse ? "course" : hasSkill ? "skill" : "summary";
+  const content = actualMode === "course" ? activeArtifact.course : actualMode === "skill" ? activeArtifact.skill : activeArtifact.knowledge || JSON.stringify(activeArtifact.evidence || activeArtifact.fusion || {}, null, 2);
+  artifactPreviewTitle.textContent = actualMode === "course" ? "给人看的课程" : actualMode === "skill" ? "Agent Skill" : "产物摘要";
+  artifactPreviewMeta.textContent = `${activeArtifact.kind || "topic"} · ${activeArtifact.run_id || ""}`;
+  artifactPreviewContent.textContent = content || "当前产物尚未生成。";
+  artifactPreviewTabs.hidden = !hasPreviewTabs;
+  document.querySelectorAll(".artifact-preview-tab").forEach(tab => {
+    const active = tab.dataset.artifactMode === actualMode;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.hidden = tab.dataset.artifactMode === "course" ? !hasCourse : !hasSkill;
+  });
+  artifactDownloadCourse.hidden = !hasCourse;
+  artifactDownloadSkill.hidden = !hasSkill;
+  if (hasCourse) artifactDownloadCourse.href = artifactDownloadUrl(activeArtifact.run_id, "course");
+  if (hasSkill) artifactDownloadSkill.href = artifactDownloadUrl(activeArtifact.run_id, "skill");
+}
+
+function openArtifactPreview(item) {
+  activeArtifact = item;
+  if (!artifactPreview) return;
+  artifactPreview.hidden = false;
+  document.body.classList.add("modal-open");
+  setArtifactPreviewMode(item.course ? "course" : "skill");
+  document.querySelector("#artifact-preview-close")?.focus();
+}
+
+function closeArtifactPreview() {
+  if (!artifactPreview) return;
+  artifactPreview.hidden = true;
+  document.body.classList.remove("modal-open");
+  activeArtifact = null;
+}
+
+document.querySelectorAll(".artifact-preview-tab").forEach(tab => tab.addEventListener("click", () => setArtifactPreviewMode(tab.dataset.artifactMode)));
+document.querySelector("#artifact-preview-close")?.addEventListener("click", closeArtifactPreview);
+document.querySelector("#artifact-preview-backdrop")?.addEventListener("click", closeArtifactPreview);
+document.addEventListener("keydown", event => { if (event.key === "Escape" && artifactPreview && !artifactPreview.hidden) closeArtifactPreview(); });
 document.querySelector("#results-compare")?.addEventListener("click", async () => {
   const ids = selectedResultIds().slice(0, 3);
   if (ids.length < 2) return showToast("至少选择两个结果进行比较");
@@ -153,11 +347,30 @@ function renderTopics() {
   }
   const labels = { created: "未搜索", planning: "规划中", awaiting_plan_confirmation: "待语义确认", searching: "搜索中", awaiting_selection: "待确认", processing_sources: "处理中", generating: "生成中", scoring: "评分中", paused: "已暂停", completed: "已完成", failed: "失败" };
   topicsList.innerHTML = topicState.topics.map(topic => `
-    <button class="topic-item ${topic.run_id === topicState.selectedId ? "active" : ""}" type="button" data-topic-id="${escapeHtml(topic.run_id)}">
-      <div class="topic-item-title">${escapeHtml(topic.topic)}</div>
-      <div class="topic-item-meta">${escapeHtml(topic.mode)} · ${escapeHtml(labels[topic.status] || topic.status)} · ${Number(topic.candidate_count) || 0} 条候选</div>
-    </button>`).join("");
+    <div class="topic-item-row">
+      <button class="topic-item ${topic.run_id === topicState.selectedId ? "active" : ""}" type="button" data-topic-id="${escapeHtml(topic.run_id)}">
+        <div class="topic-item-title">${escapeHtml(topic.topic)}</div>
+        <div class="topic-item-meta">${escapeHtml(topic.mode)} · ${escapeHtml(labels[topic.status] || topic.status)} · ${Number(topic.candidate_count) || 0} 条候选</div>
+      </button>
+      <button class="icon-button topic-delete-button" type="button" data-topic-delete="${escapeHtml(topic.run_id)}" title="归档主题" aria-label="归档主题">×</button>
+    </div>`).join("");
   topicsList.querySelectorAll("[data-topic-id]").forEach(button => button.addEventListener("click", () => selectTopic(button.dataset.topicId)));
+  topicsList.querySelectorAll("[data-topic-delete]").forEach(button => button.addEventListener("click", () => archiveTopic(button.dataset.topicDelete)));
+}
+
+async function archiveTopic(runId) {
+  const topic = topicState.topics.find(item => item.run_id === runId);
+  if (!topic) return;
+  if (!window.confirm(`确认归档主题“${topic.topic}”吗？归档后会从列表移除，但文件仍保留在 .run-archive/topics 中。`)) return;
+  try {
+    await request(`/api/topics/${encodeURIComponent(runId)}`, { method: "DELETE" });
+    const wasSelected = topicState.selectedId === runId;
+    topicState.selectedId = wasSelected ? null : topicState.selectedId;
+    await loadTopics(wasSelected);
+    showToast("主题已归档");
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 async function selectTopic(runId) {
@@ -188,8 +401,9 @@ function renderTopic(topic) {
   const planJob = topic.plan_job || {};
   const cache = topic.cache || {};
   const budgetSummary = `<span class="muted">预算：候选 ${Number(budget.max_candidates) || 0} · 处理来源 ${Number(budget.max_selected_sources) || 0} · 最长 ${Number(budget.max_runtime_sec) || 0} 秒 · 缓存 ${cache.reuse_cache ? "复用" : "关闭"}</span>`;
-  const searchButton = topic.status === "created" || topic.status === "awaiting_selection" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
-  const autoButton = topic.execution_mode === "auto" && topic.status === "created" ? '<button id="topic-auto-button" class="button primary" type="button">启动自动执行</button>' : "";
+  const canSearch = topic.status === "created" || topic.status === "awaiting_selection";
+  const searchButton = canSearch && topic.execution_mode !== "auto" ? `<button id="topic-search-button" class="button secondary" type="button">${topic.status === "created" ? "搜索候选" : "刷新搜索"}</button>` : "";
+  const autoButton = topic.execution_mode === "auto" && canSearch ? '<button id="topic-auto-button" class="button primary" type="button">启动自动执行</button>' : "";
   const selectButton = topic.status === "awaiting_selection" && candidates.length ? '<button id="topic-select-button" class="button primary" type="button">确认选择</button>' : "";
   const retryButton = topic.status === "failed" ? '<button id="topic-retry-button" class="button secondary" type="button">恢复后重试</button>' : "";
   const processButton = topic.status === "processing_sources" && !job.active ? '<button id="topic-process-button" class="button primary" type="button">开始处理已选来源</button>' : "";
@@ -216,18 +430,21 @@ function renderTopic(topic) {
       ${videoRunSummary}
     </section>` : "";
   const defaultPlanOption = plan?.options?.find(option => option.option_id === plan.recommended_option_id) || plan?.options?.[0];
+  const artifactActions = ["completed", "failed"].includes(topic.status) && (topic.artifacts?.course || topic.artifacts?.skill) ? `<div class="topic-artifact-actions"><button id="topic-artifact-preview" class="button secondary" type="button">预览产物</button>${topic.artifacts?.course ? `<a class="button secondary" href="/api/results/${encodeURIComponent(topic.run_id)}/download/course" download>下载课程文档</a>` : ""}${topic.artifacts?.skill ? `<a class="button primary" href="/api/results/${encodeURIComponent(topic.run_id)}/download/skill" download>下载 Skill 包</a>` : ""}</div>` : "";
   const planPanel = topic.status === "awaiting_plan_confirmation" && plan ? `<section class="topic-confirmation"><div><strong>确认研究语义</strong><span>${escapeHtml((plan.ambiguity_reasons || []).join("；"))}${planJob.active ? " · LLM 规划中" : ""}</span>${planJob.active ? '<button id="plan-interrupt" class="button secondary" type="button">中断 LLM 规划</button>' : ""}</div><div class="candidate-list">${(plan.options || []).map(option => `<label class="candidate-card"><input type="radio" name="plan-option" value="${escapeHtml(option.option_id)}" ${option.option_id === plan.recommended_option_id ? "checked" : ""}><span><span class="candidate-title">${escapeHtml(option.label)}</span><span class="candidate-summary">${escapeHtml(option.goal)}</span><span class="candidate-meta">${escapeHtml((option.facets || []).join(" · "))}</span></span></label>`).join("")}</div><div class="plan-editor"><label>目标<input id="plan-goal" value="${escapeHtml(defaultPlanOption?.goal || "")}"></label><label>排除范围<input id="plan-exclusions" value="${escapeHtml((defaultPlanOption?.exclusions || []).join("；"))}"></label><label>研究维度<input id="plan-facets" value="${escapeHtml((defaultPlanOption?.facets || []).join("；"))}"></label><label>查询词<input id="plan-queries" value="${escapeHtml((defaultPlanOption?.queries || []).join("；"))}"></label><button id="plan-confirm" class="button primary" type="button">确认计划</button></div></section>` : "";
   topicDetail.innerHTML = `
     <div class="topic-actions">${searchButton}${autoButton}${selectButton}${retryButton}<span class="muted">${escapeHtml(topic.status)} · ${escapeHtml(topic.execution_mode || "manual")}</span>${budgetSummary}</div>
     ${planPanel}
     ${confirmation}
     ${outcome}
+    ${artifactActions}
     ${candidates.length ? `<div class="candidate-list">${candidates.map(candidate => `
       <label class="candidate-card"><input type="checkbox" value="${escapeHtml(candidate.candidate_id)}" ${candidate.selected ? "checked" : ""} ${topic.status !== "awaiting_selection" ? "disabled" : ""}>
         <span><span class="candidate-title">${escapeHtml(candidate.title || candidate.url)}</span><span class="candidate-summary">${escapeHtml(candidate.summary || "暂无摘要")}</span><span class="candidate-meta">${escapeHtml(candidate.source_type)} · ${escapeHtml(candidate.host)} · ${escapeHtml((candidate.providers || []).join(", "))}</span><span class="candidate-meta">${escapeHtml(candidate.relevance_reason || "")}${(candidate.risk_flags || []).length ? ` · 风险：${escapeHtml(candidate.risk_flags.join(", "))}` : ""}</span></span>
         <span class="candidate-score">${Number(candidate.quality_score) || 0}</span>
       </label>`).join("")}</div>` : '<p class="muted">当前没有候选来源。</p>'}`;
   const searchButtonNode = document.querySelector("#topic-search-button");
+  document.querySelector("#topic-artifact-preview")?.addEventListener("click", async () => openArtifactPreview(await request(`/api/results/${encodeURIComponent(topic.run_id)}`)));
   if (searchButtonNode) searchButtonNode.addEventListener("click", async () => {
     searchButtonNode.disabled = true;
     searchButtonNode.textContent = "搜索中...";
@@ -436,6 +653,7 @@ function renderDetail(run) {
 form.addEventListener("submit", async event => {
   event.preventDefault();
   submitButton.disabled = true;
+  setOperation({ title: "创建视频任务", detail: "正在提交 URL 和配置", progress: 8 });
   formMessage.className = "form-message";
   formMessage.textContent = "正在创建任务...";
   try {
@@ -452,11 +670,13 @@ form.addEventListener("submit", async event => {
     form.elements.url.value = "";
     formMessage.textContent = "任务已创建，处理将在后台继续。";
     state.selectedId = result.run_id;
+    setOperation({ title: "视频任务已创建", detail: `run ${result.run_id} 已进入后台队列`, progress: 18 });
     await loadRuns();
     await selectRun(result.run_id);
   } catch (error) {
     formMessage.className = "form-message error";
     formMessage.textContent = error.message;
+    failOperation("创建视频任务失败", error.message);
   } finally {
     submitButton.disabled = false;
   }
@@ -464,6 +684,7 @@ form.addEventListener("submit", async event => {
 
 topicForm?.addEventListener("submit", async event => {
   event.preventDefault();
+  setOperation({ title: "创建主题任务", detail: "正在保存主题和预算", progress: 8 });
   topicMessage.className = "form-message";
   topicMessage.textContent = "正在创建主题...";
   try {
@@ -471,9 +692,10 @@ topicForm?.addEventListener("submit", async event => {
     topicForm.elements.topic.value = "";
     topicMessage.textContent = "主题已创建，请在右侧启动搜索。";
     topicState.selectedId = result.run_id;
+    finishOperation("主题任务已创建", result.run_id);
     await loadTopics();
     await selectTopic(result.run_id);
-  } catch (error) { topicMessage.className = "form-message error"; topicMessage.textContent = error.message; }
+  } catch (error) { topicMessage.className = "form-message error"; topicMessage.textContent = error.message; failOperation("创建主题任务失败", error.message); }
 });
 
 document.querySelector("#refresh-button").addEventListener("click", async () => {
@@ -485,6 +707,7 @@ loadTopics();
 
 modelsButton.addEventListener("click", async () => {
   modelsButton.disabled = true;
+  setOperation({ title: "查询模型列表", detail: "正在请求 NewAPI /models", progress: 20 });
   modelsButton.textContent = "查询中...";
   modelsPanel.hidden = false;
   modelsPanel.innerHTML = '<div class="loading compact">正在查询 IceAPI 模型...</div>';
@@ -494,8 +717,10 @@ modelsButton.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: currentApiKey() })
     }));
+    finishOperation("模型列表已返回", "候选模型已刷新");
   } catch (error) {
     modelsPanel.innerHTML = `<div class="notice">${escapeHtml(error.message)}</div>`;
+    failOperation("查询模型失败", error.message);
   } finally {
     modelsButton.disabled = false;
     modelsButton.textContent = "查询模型";
@@ -505,6 +730,7 @@ modelsButton.addEventListener("click", async () => {
 document.querySelector("#check-button").addEventListener("click", async event => {
   const button = event.currentTarget;
   button.disabled = true;
+  setOperation({ title: "运行 MVP 自检", detail: "正在执行离线 smoke check", progress: 18 });
   button.textContent = "自检中...";
   try {
     const result = await request("/api/mvp-check", {
@@ -513,11 +739,37 @@ document.querySelector("#check-button").addEventListener("click", async event =>
       body: JSON.stringify({ api_key: currentApiKey() })
     });
     showToast(result.status === "passed" ? "MVP 自检通过" : "MVP 自检未通过");
+    finishOperation("MVP 自检完成", result.status === "passed" ? "通过" : "未通过");
   } catch (error) {
     showToast(error.message);
+    failOperation("MVP 自检失败", error.message);
   } finally {
     button.disabled = false;
     button.textContent = "运行自检";
+  }
+});
+
+document.querySelector("#readiness-button").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  setOperation({ title: "真实功能检查", detail: "正在创建后台检查任务", progress: 4 });
+  button.textContent = "检查中...";
+  try {
+    const job = await request("/api/readiness-check/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: currentApiKey(), load_asr_model: true })
+    });
+    renderReadinessJob(job);
+    const finalJob = await pollReadinessJob(job.job_id);
+    const result = finalJob.result || {};
+    showToast(result.status === "passed" ? "真实功能检查通过" : "真实功能仍有未开通项");
+  } catch (error) {
+    showToast(error.message);
+    failOperation("真实功能检查失败", error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "检查真实功能";
   }
 });
 
@@ -538,6 +790,7 @@ async function poll() {
   try {
     await loadRuns();
     const latest = state.runs.find(run => run.run_id === state.selectedId);
+    updateRunOperation(latest);
     if (latest && (latest.updated_at || "") !== state.selectedDetailVersion) {
       const runId = state.selectedId;
       const run = await request(`/api/runs/${encodeURIComponent(runId)}`);
@@ -545,6 +798,10 @@ async function poll() {
         state.selectedDetailVersion = run.updated_at || "";
         renderDetail(run);
       }
+    }
+    if (latest && !RUN_POLL_STATUSES.has(latest.status)) {
+      if (latest.status === "completed") finishOperation("视频任务完成", "结果已生成");
+      if (latest.status === "failed") failOperation("视频任务失败", latest.failure_reason || latest.job?.error || "请查看任务详情");
     }
   } finally {
     runPollState.inFlight = false;
@@ -561,6 +818,7 @@ async function pollTopics() {
   try {
     await loadTopics();
     const latest = topicState.topics.find(topic => topic.run_id === topicState.selectedId);
+    updateTopicOperation(latest);
     if (latest && (latest.updated_at || "") !== topicState.selectedDetailVersion) {
       const runId = topicState.selectedId;
       const topic = await request(`/api/topics/${encodeURIComponent(runId)}`);
@@ -568,6 +826,10 @@ async function pollTopics() {
         topicState.selectedDetailVersion = topic.updated_at || "";
         renderTopic(topic);
       }
+    }
+    if (latest && !TOPIC_POLL_STATUSES.has(latest.status)) {
+      if (latest.status === "completed") finishOperation("主题任务完成", "课程和证据已生成");
+      if (latest.status === "failed") failOperation("主题任务失败", latest.failure_reason || "请查看主题详情");
     }
   } finally {
     topicPollState.inFlight = false;

@@ -82,6 +82,56 @@ class TopicFusionTests(unittest.TestCase):
             self.assertIn("unresolved_source_conflicts", fusion["risk_flags"])
             self.assertIn("unresolved_conflicts", {item["code"] for item in fusion["evidence_gaps"]})
 
+    def test_does_not_treat_adjacent_claims_from_one_source_as_conflict(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _store, task, root = self._topic(Path(temp_dir), source_types=("web", "github"))
+            write_json(
+                root / "topic_package/evidence/web.json",
+                self._web(
+                    "web-one",
+                    "响应式页面需要检查画布尺寸。然后调用 renderer.setSize 更新绘制缓冲区。",
+                ),
+            )
+            write_json(
+                root / "topic_package/evidence/github.json",
+                self._github("github-one", "window.addEventListener('resize', onWindowResize);", quality=90),
+            )
+
+            fusion = fuse_topic_evidence(task, root)
+
+            self.assertFalse(fusion["conflicts"])
+
+    def test_does_not_treat_conditional_or_not_as_negative_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _store, task, root = self._topic(Path(temp_dir), source_types=("web", "github"))
+            write_json(root / "topic_package/evidence/web.json", self._web("web-one", "If we need to resize or not, call renderer.setSize."))
+            write_json(root / "topic_package/evidence/github.json", self._github("github-one", "window.addEventListener('resize', onWindowResize);", quality=90))
+
+            fusion = fuse_topic_evidence(task, root)
+
+            self.assertFalse(fusion["conflicts"])
+
+    def test_does_not_match_not_inside_note_as_negation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _store, task, root = self._topic(Path(temp_dir), source_types=("web", "github"))
+            write_json(root / "topic_package/evidence/web.json", self._web("web-one", "Note that the canvas is resized when needed."))
+            write_json(root / "topic_package/evidence/github.json", self._github("github-one", "window.addEventListener('resize', onWindowResize);", quality=90))
+
+            fusion = fuse_topic_evidence(task, root)
+
+            self.assertFalse(fusion["conflicts"])
+
+    def test_fuses_equivalent_negative_security_wording_without_conflict(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _store, task, root = self._topic(Path(temp_dir), source_types=("web", "github"))
+            write_json(root / "topic_package/evidence/web.json", self._web("web-one", "The browser marks the connection as insecure."))
+            write_json(root / "topic_package/evidence/github.json", self._github("github-one", "The browser marks the connection as not secure.", quality=90))
+
+            fusion = fuse_topic_evidence(task, root)
+
+            self.assertFalse(fusion["conflicts"])
+            self.assertEqual(fusion["conclusions"][0]["supporting_source_count"], 2)
+
     def test_marks_single_source_conclusions_low_confidence_and_records_gap(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             _store, task, root = self._topic(Path(temp_dir), source_types=("video",))
@@ -138,6 +188,41 @@ class TopicFusionTests(unittest.TestCase):
 
             self.assertEqual(fusion["conclusions"][0]["claim"], "首先创建状态基类，然后定义进入和退出方法。")
 
+    def test_excludes_browser_chrome_observations_from_video_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _store, task, root = self._topic(Path(temp_dir), source_types=("video",))
+            video = self._video("video-one", "角色进入第三人称场景。", confidence=0.8)
+            video["timeline"]["items"].extend(
+                [
+                    {
+                        "timestamp": "00:00:10",
+                        "type": "frame_ocr",
+                        "claim": "The application is being accessed at the local network address 192.168.1.10:5173.",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "timestamp": "00:00:20",
+                        "type": "frame_ocr",
+                        "claim": "The browser marks the connection as unsafe.",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "timestamp": "00:00:30",
+                        "type": "frame_ocr",
+                        "claim": "A third-person character stands next to a vehicle obstacle.",
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+            write_json(root / "topic_package/evidence/video.json", video)
+
+            fusion = fuse_topic_evidence(task, root)
+
+            claims = [item["claim"] for item in fusion["conclusions"]]
+            self.assertNotIn("The application is being accessed at the local network address 192.168.1.10:5173.", claims)
+            self.assertNotIn("The browser marks the connection as unsafe.", claims)
+            self.assertIn("A third-person character stands next to a vehicle obstacle.", claims)
+
     def test_excludes_pure_video_outro_but_keeps_technical_intro(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             _store, task, root = self._topic(Path(temp_dir), source_types=("video",))
@@ -179,19 +264,50 @@ class TopicFusionTests(unittest.TestCase):
             write_json(root / "topic_package/evidence/web.json", self._web("web-one", "首先安装依赖，然后运行测试验证安装结果。"))
 
             fusion = fuse_topic_evidence(task, root)
-            fusion_path, knowledge_path = write_fusion_artifacts(task, root, fusion)
+            fusion_path, course_path, knowledge_path = write_fusion_artifacts(task, root, fusion)
+            task.artifacts["course"] = course_path.relative_to(root).as_posix()
             task.artifacts["fusion"] = fusion_path.relative_to(root).as_posix()
             task.artifacts["knowledge"] = knowledge_path.relative_to(root).as_posix()
             store.save(task)
 
             saved = json.loads(fusion_path.read_text(encoding="utf-8"))
             knowledge = knowledge_path.read_text(encoding="utf-8")
+            course = course_path.read_text(encoding="utf-8")
             loaded = store.load(task.run_id)
             self.assertEqual(saved["schema_version"], "0.8")
             self.assertIn("## 关键结论", knowledge)
             self.assertIn("[S1:sentence:1]", knowledge)
+            self.assertIn("## 学完你能获得什么", course)
+            self.assertIn("## 跟着内容学习", course)
+            self.assertIn("## 自测", course)
+            self.assertIn("首先安装依赖，然后运行测试验证安装结果。", course)
+            self.assertEqual(loaded.artifacts["course"], "topic_package/COURSE.md")
             self.assertEqual(loaded.artifacts["fusion"], "topic_package/fusion.json")
             self.assertEqual(loaded.package.fusion, "topic_package/fusion.json")
+
+    def test_writes_human_course_from_structured_distillation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _store, task, root = self._topic(Path(temp_dir), source_types=("web",))
+            course = {
+                "title": "导航入门",
+                "learning_outcomes": ["理解路径"],
+                "overview": "先建立整体认识。",
+                "lessons": [{"heading": "1. 设置目标", "content": "设置目标后再读取下一路径点。", "evidence_refs": ["S1:sentence:1"]}],
+                "pitfalls": ["不要把目标点当作下一路径点"],
+                "exercises": ["完成最小导航场景"],
+                "next_steps": ["补充避障资料"],
+            }
+            fusion = {"conclusions": [], "source_summary": [], "evidence_gaps": []}
+
+            _fusion_path, course_path, _knowledge_path = write_fusion_artifacts(task, root, fusion, distilled_course=course)
+
+            rendered = course_path.read_text(encoding="utf-8")
+            self.assertIn("# 导航入门", rendered)
+            self.assertIn("设置目标后再读取下一路径点。", rendered)
+            self.assertIn("证据：[S1:sentence:1]", rendered)
+            self.assertIn("### 1. 设置目标", rendered)
+            self.assertNotIn("### 1. 1. 设置目标", rendered)
+            self.assertNotIn("降级提纲", rendered)
 
     def test_web_evidence_prioritizes_later_topic_actions_over_intro_boilerplate(self):
         with tempfile.TemporaryDirectory() as temp_dir:

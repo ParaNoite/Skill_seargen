@@ -5,6 +5,8 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -136,6 +138,23 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(len(selected["selected_sources"]), 1)
             self.assertTrue((root / "runs" / created["run_id"] / "topic_package" / "sources.json").exists())
 
+    def test_auto_topic_can_continue_after_candidates_were_searched(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            created = app.create_topic("Godot NavigationAgent3D", mode="technical", execution_mode="auto")
+            searched = app.search_topic(created["run_id"], use_fake=True)
+            self.assertEqual(searched["status"], "awaiting_selection")
+
+            with patch.object(app, "process_topic", side_effect=lambda run_id, **_: app.get_topic(run_id)):
+                continued = app.start_auto_topic(created["run_id"], use_fake=True)
+
+            self.assertEqual(continued["status"], "processing_sources")
+            self.assertGreaterEqual(len(continued["selected_sources"]), 2)
+            self.assertIn("auto_sources_selected", [entry["event"] for entry in continued["plan_audit"]])
+
     def test_v11_plan_operations_and_unified_queries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -167,6 +186,9 @@ class WebAppTests(unittest.TestCase):
             task.artifacts.update({"skill": "topic_package/SKILL.md", "score": "topic_package/score.json"})
             run_root = app.topic_store.run_path(task.run_id)
             (run_root / "topic_package/SKILL.md").write_text("# Skill content", encoding="utf-8")
+            (run_root / "topic_package/COURSE.md").write_text("# Course content", encoding="utf-8")
+            task.package.course = "topic_package/COURSE.md"
+            task.artifacts["course"] = "topic_package/COURSE.md"
             (run_root / "topic_package/score.json").write_text(json.dumps({"final_score": 88, "final_status": "passed"}), encoding="utf-8")
             app.topic_store.save(task)
             normal = app.create_topic("Godot NavigationAgent2D", mode="normal")
@@ -180,6 +202,37 @@ class WebAppTests(unittest.TestCase):
 
             self.assertEqual([item["run_id"] for item in skills], [task.run_id])
             self.assertEqual(detail["skill"], "# Skill content")
+            self.assertEqual(detail["course"], "# Course content")
+            self.assertEqual(detail["downloads"], {"course": True, "skill": True})
+
+            course_name, course_type, course_payload = app.download_result(task.run_id, "course")
+            skill_name, skill_type, skill_payload = app.download_result(task.run_id, "skill")
+
+            self.assertTrue(course_name.endswith("-course.md"))
+            self.assertEqual(course_type, "text/markdown; charset=utf-8")
+            self.assertEqual(course_payload.decode("utf-8"), "# Course content")
+            self.assertTrue(skill_name.endswith("-skill.zip"))
+            self.assertEqual(skill_type, "application/zip")
+            with zipfile.ZipFile(BytesIO(skill_payload)) as archive:
+                names = archive.namelist()
+                self.assertTrue(any(name.endswith("/SKILL.md") for name in names))
+                self.assertTrue(any(name.endswith("/COURSE.md") for name in names))
+
+    def test_result_download_rejects_artifact_outside_run_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            app = WebApp(config=str(config_path), runs=str(root / "runs"), out=str(root / "skills"))
+            created = app.create_topic("越界检查", mode="technical")
+            task = app.topic_store.load(created["run_id"])
+            task.status = "completed"
+            task.artifacts["course"] = "../outside.md"
+            (app.topic_store.run_path(task.run_id).parent / "outside.md").write_text("outside", encoding="utf-8")
+            app.topic_store.save(task)
+
+            with self.assertRaisesRegex(FileNotFoundError, "课程文档"):
+                app.download_result(task.run_id, "course")
 
     def test_lists_and_reads_existing_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -290,13 +343,59 @@ class WebHttpTests(unittest.TestCase):
         self.assertIn("application/json", api_type)
         self.assertEqual(json.loads(payload), {"runs": []})
 
+    def test_serves_frontend_from_explicit_asset_directory(self):
+        assets = self.root / "school-assets"
+        assets.mkdir()
+        (assets / "index.html").write_text("<!doctype html><title>AI 大学</title>", encoding="utf-8")
+        (assets / "app.css").write_text("body { color: #17211c; }", encoding="utf-8")
+        (assets / "app.js").write_text("window.schoolApp = true;", encoding="utf-8")
+        (assets / "react-nav.js").write_text("window.schoolNav = true;", encoding="utf-8")
+        server = create_server(
+            host="127.0.0.1",
+            port=0,
+            config=str(self.config_path),
+            runs=str(self.root / "school-runs"),
+            out=str(self.root / "school-skills"),
+            assets_dir=assets,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request("GET", "/")
+            response = connection.getresponse()
+            payload = response.read().decode("utf-8")
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("AI 大学", payload)
+
+    def test_rejects_incomplete_explicit_asset_directory(self):
+        assets = self.root / "incomplete-assets"
+        assets.mkdir()
+        (assets / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+        with self.assertRaisesRegex(FileNotFoundError, "app.css"):
+            create_server(
+                host="127.0.0.1",
+                port=0,
+                config=str(self.config_path),
+                runs=str(self.root / "school-runs"),
+                out=str(self.root / "school-skills"),
+                assets_dir=assets,
+            )
+
     def test_catalog_endpoints_list_detail_and_download_authorized_package(self):
         status, content_type, payload = self.request("GET", "/api/catalog")
         items = json.loads(payload)["items"]
 
         self.assertEqual(status, 200)
         self.assertIn("application/json", content_type)
-        self.assertEqual(len(items), 12)
+        self.assertEqual(len(items), 22)
         item_id = next(item["id"] for item in items if item["downloadable"])
 
         detail_status, _, detail_payload = self.request("GET", f"/api/catalog/{item_id}")
@@ -308,12 +407,44 @@ class WebHttpTests(unittest.TestCase):
         self.assertEqual(download_type, "application/zip")
         self.assertGreater(len(download_payload), 100)
 
+    def test_agent_endpoints_list_detail_and_download_package(self):
+        status, content_type, payload = self.request("GET", "/api/agents")
+        agents = json.loads(payload)["agents"]
+
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        self.assertGreaterEqual(len(agents), 1)
+        self.assertTrue(any(agent["id"] == "math-modeling-researcher" for agent in agents))
+        agent_id = agents[0]["id"]
+        detail_status, _, detail_payload = self.request("GET", f"/api/agents/{agent_id}")
+        download_status, download_type, download_payload = self.request("GET", f"/api/agents/{agent_id}/download")
+
+        self.assertEqual(detail_status, 200)
+        self.assertEqual(json.loads(detail_payload)["id"], agent_id)
+        self.assertEqual(download_status, 200)
+        self.assertEqual(download_type, "application/zip")
+        self.assertGreater(len(download_payload), 100)
+
     def test_catalog_rejects_download_for_external_index(self):
         status, content_type, payload = self.request("GET", "/api/catalog/openai-docs/download")
 
         self.assertEqual(status, 403)
         self.assertIn("application/json", content_type)
         self.assertIn("未获得", json.loads(payload)["error"])
+
+    def test_assemble_endpoint_returns_opencode_agent_zip(self):
+        status, content_type, payload = self.request(
+            "POST",
+            "/api/assemble",
+            body=json.dumps({"item_ids": ["browser-game-prototype"], "agent_name": "browser-agent"}),
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/zip")
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            self.assertIn("browser-agent/.opencode/agents/browser-agent.md", archive.namelist())
+            self.assertIn("browser-agent/.opencode/skills/browser-game-prototype/SKILL.md", archive.namelist())
 
     def test_rejects_empty_video_url(self):
         status, _, payload = self.request(
@@ -385,6 +516,29 @@ class WebHttpTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/metrics")[0], 200)
         self.assertEqual(self.request("GET", "/api/results?type=topic&status=needs_review")[0], 200)
 
+    def test_result_download_endpoints_serve_course_and_skill_package(self):
+        app = WebApp(config=str(self.config_path), runs=str(self.root / "runs"), out=str(self.root / "skills"))
+        created = app.create_topic("下载测试", mode="technical")
+        task = app.topic_store.load(created["run_id"])
+        task.status = "completed"
+        task.current_stage = "completed"
+        task.artifacts.update({"course": "topic_package/COURSE.md", "skill": "topic_package/SKILL.md"})
+        package_root = app.topic_store.run_path(task.run_id) / "topic_package"
+        (package_root / "COURSE.md").write_text("# 给人看的课程", encoding="utf-8")
+        (package_root / "SKILL.md").write_text("# Agent Skill", encoding="utf-8")
+        app.topic_store.save(task)
+
+        course_status, course_type, course_payload = self.request("GET", f"/api/results/{task.run_id}/download/course")
+        skill_status, skill_type, skill_payload = self.request("GET", f"/api/results/{task.run_id}/download/skill")
+
+        self.assertEqual(course_status, 200)
+        self.assertEqual(course_type, "text/markdown; charset=utf-8")
+        self.assertEqual(course_payload.decode("utf-8"), "# 给人看的课程")
+        self.assertEqual(skill_status, 200)
+        self.assertEqual(skill_type, "application/zip")
+        with zipfile.ZipFile(BytesIO(skill_payload)) as archive:
+            self.assertTrue(any(name.endswith("/SKILL.md") for name in archive.namelist()))
+
     def test_accepts_api_key_for_current_process_without_echoing_it(self):
         status, _, payload = self.request(
             "POST",
@@ -395,6 +549,34 @@ class WebHttpTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(os.environ["SKILL_GATHER_TEST_API_KEY"], "secret-key")
+        self.assertNotIn("secret-key", payload.decode("utf-8"))
+
+    def test_readiness_check_runs_as_progressible_background_job(self):
+        with patch("skill_gather.web.run_readiness_check", return_value={
+            "status": "passed",
+            "checks": [{"name": "config", "status": "passed"}],
+            "summary": {"passed": 1, "warning": 0, "failed": 0, "total": 1},
+            "notes": [],
+        }):
+            status, _, payload = self.request(
+                "POST",
+                "/api/readiness-check/start",
+                body=json.dumps({"api_key": "secret-key", "load_asr_model": False}),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 202)
+            job_id = json.loads(payload)["job_id"]
+
+            for _ in range(20):
+                status, _, payload = self.request("GET", f"/api/readiness-check/{job_id}")
+                job = json.loads(payload)
+                if not job["active"]:
+                    break
+                time.sleep(0.02)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(job["status"], "finished")
+        self.assertEqual(job["result"]["status"], "passed")
         self.assertNotIn("secret-key", payload.decode("utf-8"))
 
     def test_lists_models_with_api_key_without_echoing_it(self):
@@ -435,13 +617,13 @@ class WebHttpTests(unittest.TestCase):
         self.assertTrue(parsed["catalog_only"])
         self.assertNotIn("secret-key", body)
 
-    def test_lists_models_with_literal_config_api_key(self):
+    def test_rejects_literal_config_api_key(self):
         literal_config = {
             **CONFIG,
             "providers": {
                 "newapi": {
                     **CONFIG["providers"]["newapi"],
-                    "api_key_env": "sk-test-literal-key",
+                    "api_key_env": "sk_test_fixture",
                 }
             },
         }
@@ -468,11 +650,10 @@ class WebHttpTests(unittest.TestCase):
                     headers={"Content-Type": "application/json"},
                 )
 
-        request = urlopen.call_args.args[0]
         body = payload.decode("utf-8")
-        self.assertEqual(status, 200)
-        self.assertEqual(request.headers["Authorization"], "Bearer sk-test-literal-key")
-        self.assertNotIn("sk-test-literal-key", body)
+        self.assertEqual(status, 400)
+        self.assertIsNone(urlopen.call_args)
+        self.assertNotIn("sk_test_fixture", body)
 
     def test_deletes_run_artifacts_by_id(self):
         run_dir = self.root / "runs" / "bilibili-BVdemo"
@@ -502,6 +683,50 @@ class WebHttpTests(unittest.TestCase):
         self.assertFalse(run_dir.exists())
         self.assertEqual(list_status, 200)
         self.assertEqual(json.loads(list_payload), {"runs": []})
+
+    def test_archives_topic_artifacts_by_id(self):
+        headers = {"Content-Type": "application/json"}
+        status, _, payload = self.request(
+            "POST",
+            "/api/topics",
+            body=json.dumps({"topic": "可清理主题", "mode": "technical"}),
+            headers=headers,
+        )
+        self.assertEqual(status, 201)
+        run_id = json.loads(payload)["run_id"]
+        run_dir = self.root / "runs" / run_id
+
+        status, content_type, payload = self.request("DELETE", f"/api/topics/{run_id}")
+        archived = json.loads(payload)
+
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        self.assertEqual(archived["status"], "archived")
+        self.assertFalse(run_dir.exists())
+        self.assertTrue((self.root / archived["archive_path"] / "topic_state.json").exists())
+        self.assertEqual(json.loads(self.request("GET", "/api/topics")[2]), {"topics": []})
+
+    def test_rejects_archiving_active_topic(self):
+        headers = {"Content-Type": "application/json"}
+        status, _, payload = self.request(
+            "POST",
+            "/api/topics",
+            body=json.dumps({"topic": "运行中的主题", "mode": "technical"}),
+            headers=headers,
+        )
+        self.assertEqual(status, 201)
+        run_id = json.loads(payload)["run_id"]
+        state_path = self.root / "runs" / run_id / "topic_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["status"] = "searching"
+        state["current_stage"] = "searching"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        status, _, payload = self.request("DELETE", f"/api/topics/{run_id}")
+
+        self.assertEqual(status, 409)
+        self.assertIn("正在处理", json.loads(payload)["error"])
+        self.assertTrue(state_path.exists())
 
 
 if __name__ == "__main__":

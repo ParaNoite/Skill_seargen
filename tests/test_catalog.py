@@ -9,23 +9,44 @@ from skill_gather.catalog import CatalogStore, default_catalog_root
 
 
 class CatalogStoreTests(unittest.TestCase):
-    def test_repository_catalog_has_twelve_complete_items(self):
+    def test_repository_catalog_has_curated_complete_items(self):
         store = CatalogStore(default_catalog_root())
 
         items = store.list_items()
 
-        self.assertEqual(len(items), 12)
-        self.assertEqual(sum(item["downloadable"] for item in items), 4)
+        self.assertEqual(len(items), 22)
+        self.assertEqual(sum(item["downloadable"] for item in items), 9)
         self.assertTrue(all(item["source_url"].startswith("https://") for item in items))
         self.assertTrue(all(item["license"] for item in items))
+        self.assertEqual(
+            {item["id"] for item in items[:3]},
+            {"browser-game-prototype", "browser-game-playtest", "game-loop-design"},
+        )
+        self.assertEqual(store.get_item("nvidia-skillspector")["popularity"]["status"], "observed")
+        self.assertTrue(store.get_item("math-modeling-method")["downloadable"])
 
     def test_filters_by_query_category_and_availability(self):
         store = CatalogStore(default_catalog_root())
 
         self.assertEqual([item["id"] for item in store.list_items(query="ASR")], ["video-evidence-distiller"])
-        self.assertEqual(len(store.list_items(category="研究")), 2)
-        self.assertEqual(len(store.list_items(availability="downloadable")), 4)
-        self.assertEqual(len(store.list_items(availability="source_only")), 8)
+        self.assertEqual(len(store.list_items(category="研究")), 4)
+        self.assertEqual(len(store.list_items(availability="downloadable")), 9)
+        self.assertEqual(len(store.list_items(availability="source_only")), 13)
+
+    def test_ppt_agent_is_a_complete_downloadable_skill(self):
+        store = CatalogStore(default_catalog_root())
+
+        item = store.get_item("ppt-agent")
+
+        self.assertTrue(item["downloadable"])
+        self.assertEqual(item["review_status"], "verified")
+        filename, payload = store.build_agent_package(["ppt-agent"], "ppt-agent-demo")
+        self.assertEqual(filename, "ppt-agent-demo.zip")
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            self.assertIn("ppt-agent-demo/.opencode/skills/ppt-agent/SKILL.md", archive.namelist())
+            self.assertIn("ppt-agent-demo/.opencode/skills/ppt-agent/LICENSE", archive.namelist())
+            skill_text = archive.read("ppt-agent-demo/.opencode/skills/ppt-agent/SKILL.md").decode("utf-8")
+            self.assertIn("重新打开最终 PPTX", skill_text)
 
     def test_builds_zip_for_authorized_local_package(self):
         store = CatalogStore(default_catalog_root())
@@ -36,6 +57,35 @@ class CatalogStoreTests(unittest.TestCase):
         with zipfile.ZipFile(BytesIO(payload)) as archive:
             self.assertIn("video-evidence-distiller/SKILL.md", archive.namelist())
             self.assertIn("video-evidence-distiller/LICENSE", archive.namelist())
+
+    def test_builds_opencode_agent_from_selected_skills(self):
+        store = CatalogStore(default_catalog_root())
+
+        filename, payload = store.build_agent_package(["browser-game-prototype", "game-loop-design"], "runner-agent")
+
+        self.assertEqual(filename, "runner-agent.zip")
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            names = archive.namelist()
+            self.assertIn("runner-agent/AGENTS.md", names)
+            self.assertIn("runner-agent/.opencode/agents/runner-agent.md", names)
+            self.assertIn("runner-agent/.opencode/skills/browser-game-prototype/SKILL.md", names)
+            self.assertIn("runner-agent/.opencode/skills/game-loop-design/SKILL.md", names)
+
+    def test_agent_package_rejects_empty_selection(self):
+        with self.assertRaisesRegex(ValueError, "至少选择"):
+            CatalogStore(default_catalog_root()).build_agent_package([])
+
+    def test_lists_and_downloads_curated_agents(self):
+        store = CatalogStore(default_catalog_root())
+
+        agent = store.get_agent("ppt-presenter")
+        self.assertEqual(agent["role"], "演示文稿顾问")
+        self.assertEqual([skill["id"] for skill in agent["skills"]], ["ppt-agent", "skill-release-review"])
+        filename, payload = store.build_agent_download("ppt-presenter")
+        self.assertEqual(filename, "ppt-presenter.zip")
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            self.assertIn("ppt-presenter/.opencode/agents/ppt-presenter.md", archive.namelist())
+            self.assertIn("ppt-presenter/.opencode/skills/ppt-agent/SKILL.md", archive.namelist())
 
     def test_builds_zip_with_the_manifest_license_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

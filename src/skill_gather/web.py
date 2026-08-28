@@ -7,6 +7,7 @@ import os
 import threading
 import urllib.error
 import urllib.request
+import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -22,6 +23,7 @@ from .integrations.newapi import NewApiClient, resolve_api_key
 from .models import PIPELINE_STAGES
 from .planning import assess_ambiguity, build_semantic_plan
 from .mvp_check import run_mvp_check
+from .readiness_check import run_readiness_check
 from .runs import RunStore, read_json, safe_slug
 from .search import search_topic as execute_topic_search
 from .source import infer_source
@@ -43,6 +45,7 @@ class WebApp:
         self._topic_cancellations: dict[str, threading.Event] = {}
         self._plan_cancellations: dict[str, threading.Event] = {}
         self._plan_jobs: dict[str, dict[str, Any]] = {}
+        self._readiness_jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def list_catalog(
@@ -66,6 +69,18 @@ class WebApp:
 
     def download_catalog_item(self, item_id: str) -> tuple[str, bytes]:
         return self.catalog_store.build_download(item_id)
+
+    def assemble_agent(self, item_ids: list[str], agent_name: str = "skill-seargen-agent") -> tuple[str, bytes]:
+        return self.catalog_store.build_agent_package(item_ids, agent_name)
+
+    def list_agents(self) -> list[dict[str, Any]]:
+        return self.catalog_store.list_agents()
+
+    def get_agent(self, agent_id: str) -> dict[str, Any]:
+        return self.catalog_store.get_agent(agent_id)
+
+    def download_agent(self, agent_id: str) -> tuple[str, bytes]:
+        return self.catalog_store.build_agent_download(agent_id)
 
     def list_runs(self) -> list[dict[str, Any]]:
         if not self.store.root.exists():
@@ -322,27 +337,77 @@ class WebApp:
             detail = self.get_topic(run_id)
             run_root = self.topic_store.run_path(run_id)
             artifacts = detail.get("artifacts", {})
+            course = self._artifact_text(run_root, artifacts.get("course"))
+            skill = self._artifact_text(run_root, artifacts.get("skill"))
             return {
                 "run_id": run_id,
                 "kind": "topic",
                 "title": detail.get("topic", run_id),
+                "course": course,
                 "knowledge": self._artifact_text(run_root, artifacts.get("knowledge")),
-                "skill": self._artifact_text(run_root, artifacts.get("skill")),
+                "skill": skill,
                 "score": self._optional_json(run_root / artifacts["score"]) if artifacts.get("score") else {},
                 "fusion": detail.get("fusion", {}),
                 "risk_flags": detail.get("fusion", {}).get("risk_flags", []),
+                "downloads": {"course": bool(course), "skill": bool(skill)},
             }
         detail = self.get_run(run_id)
         return {
             "run_id": run_id,
             "kind": "video",
             "title": detail.get("title", run_id),
+            "course": "",
             "knowledge": "",
             "skill": "",
             "score": detail.get("score", {}),
             "evidence": detail.get("evidence", []),
             "risk_flags": detail.get("risk_flags", []),
+            "downloads": {"course": False, "skill": False},
         }
+
+    def download_result(self, run_id: str, artifact_kind: str) -> tuple[str, str, bytes]:
+        if not self.topic_store.state_path(run_id).exists():
+            raise FileNotFoundError(f"找不到主题 run：{run_id}")
+        detail = self.get_topic(run_id)
+        run_root = self.topic_store.run_path(run_id)
+        artifacts = detail.get("artifacts", {})
+        package_name = safe_slug(run_id)
+
+        if artifact_kind == "course":
+            course_path = self._artifact_path(run_root, artifacts.get("course"))
+            if course_path is None or not course_path.is_file() or course_path.stat().st_size > 2 * 1024 * 1024:
+                raise FileNotFoundError("课程文档尚未生成或不可下载")
+            return f"{package_name}-course.md", "text/markdown; charset=utf-8", course_path.read_bytes()
+
+        if artifact_kind == "skill":
+            skill_path = self._artifact_path(run_root, artifacts.get("skill"))
+            if skill_path is None or not skill_path.is_file():
+                raise FileNotFoundError("Skill 包尚未生成")
+            package_root = skill_path.parent.resolve()
+            run_root_resolved = run_root.resolve()
+            try:
+                package_root.relative_to(run_root_resolved)
+            except ValueError as exc:
+                raise ValueError("Skill 包路径超出当前 run 目录") from exc
+
+            buffer = io.BytesIO()
+            total_size = 0
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(package_root.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    resolved = path.resolve()
+                    try:
+                        relative = resolved.relative_to(package_root)
+                    except ValueError as exc:
+                        raise ValueError("Skill 包包含指向包目录外的文件") from exc
+                    total_size += resolved.stat().st_size
+                    if total_size > 100 * 1024 * 1024:
+                        raise ValueError("Skill 包超过 100 MB 下载上限")
+                    archive.write(resolved, Path(package_name) / relative)
+            return f"{package_name}-skill.zip", "application/zip", buffer.getvalue()
+
+        raise ValueError(f"不支持的产物类型：{artifact_kind}")
 
     def search_topic(self, run_id: str, *, use_fake: bool = False, config_path: str | None = None) -> dict[str, Any]:
         config = load_config(config_path or self.config_path)
@@ -515,6 +580,90 @@ class WebApp:
         self._apply_api_key(config.newapi.api_key_env, api_key)
         return run_mvp_check(config)
 
+    def run_readiness_check(self, api_key: str = "", load_asr_model: bool = True) -> dict[str, Any]:
+        config = load_config(self.config_path)
+        self._apply_api_key(config.newapi.api_key_env, api_key)
+        return run_readiness_check(config, load_asr_model=load_asr_model)
+
+    def start_readiness_check(self, api_key: str = "", load_asr_model: bool = True) -> dict[str, Any]:
+        import uuid
+
+        job_id = f"readiness-{uuid.uuid4().hex[:12]}"
+        with self._lock:
+            self._readiness_jobs[job_id] = {
+                "job_id": job_id,
+                "active": True,
+                "status": "queued",
+                "index": 0,
+                "total": 0,
+                "progress": 0,
+                "current": "",
+                "checks": [],
+                "result": None,
+                "error": "",
+            }
+
+        thread = threading.Thread(
+            target=self._run_readiness_check,
+            args=(job_id, api_key, load_asr_model),
+            name=f"skill-gather-{job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return self.get_readiness_check(job_id)
+
+    def get_readiness_check(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._readiness_jobs.get(job_id)
+            if not job:
+                raise FileNotFoundError("未找到真实功能检查任务")
+            return dict(job)
+
+    def _run_readiness_check(self, job_id: str, api_key: str, load_asr_model: bool) -> None:
+        try:
+            config = load_config(self.config_path)
+            self._apply_api_key(config.newapi.api_key_env, api_key)
+
+            def on_progress(event: dict[str, Any]) -> None:
+                with self._lock:
+                    job = self._readiness_jobs[job_id]
+                    total = int(event.get("total") or 0)
+                    index = int(event.get("index") or 0)
+                    job.update({
+                        "status": "running" if event.get("event") != "finished" else "finished",
+                        "index": index,
+                        "total": total,
+                        "progress": round(index / total * 100) if total else 0,
+                        "current": event.get("label", ""),
+                        "checks": event.get("checks", job.get("checks", [])),
+                    })
+                    if event.get("event") == "finished":
+                        job["result"] = event.get("result")
+
+            result = run_readiness_check(
+                config,
+                load_asr_model=load_asr_model,
+                on_progress=on_progress,
+            )
+            with self._lock:
+                self._readiness_jobs[job_id].update({
+                    "active": False,
+                    "status": "finished",
+                    "progress": 100,
+                    "current": "已完成",
+                    "result": result,
+                    "checks": result.get("checks", []),
+                    "error": "",
+                })
+        except Exception as exc:
+            with self._lock:
+                self._readiness_jobs[job_id].update({
+                    "active": False,
+                    "status": "failed",
+                    "current": "检查失败",
+                    "error": str(exc),
+                })
+
     def list_models(self, api_key: str = "") -> dict[str, Any]:
         config = load_config(self.config_path)
         api_key = api_key.strip() or resolve_api_key(str(config.newapi.api_key_env))
@@ -554,6 +703,32 @@ class WebApp:
         with self._lock:
             self._jobs.pop(run_id, None)
         return {"run_id": run_id, "status": "deleted"}
+
+    def archive_topic(self, run_id: str) -> dict[str, Any]:
+        if not run_id or safe_slug(run_id) != run_id:
+            raise FileNotFoundError("无效的主题 run id")
+
+        task = self.topic_store.load(run_id)
+        with self._lock:
+            topic_job = self._topic_jobs.get(run_id)
+            plan_job = self._plan_jobs.get(run_id)
+            if (topic_job and topic_job.get("active")) or (plan_job and plan_job.get("active")):
+                raise RuntimeError("这个主题正在处理，请先暂停或等待任务结束")
+        if task.status in {"planning", "searching", "generating", "scoring"}:
+            raise RuntimeError("这个主题正在处理，请先暂停或等待任务结束")
+
+        archive_root = Path(self.runs_path).resolve().parent / ".run-archive" / "topics"
+        destination = self.topic_store.archive(run_id, archive_root)
+        with self._lock:
+            self._topic_jobs.pop(run_id, None)
+            self._topic_cancellations.pop(run_id, None)
+            self._plan_jobs.pop(run_id, None)
+            self._plan_cancellations.pop(run_id, None)
+        return {
+            "run_id": run_id,
+            "status": "archived",
+            "archive_path": str(destination.relative_to(archive_root.parent.parent)),
+        }
 
     @staticmethod
     def _apply_api_key(env_name: str, api_key: str) -> None:
@@ -642,13 +817,8 @@ class WebApp:
 
     @staticmethod
     def _artifact_text(run_root: Path, relative_path: Any) -> str:
-        if not relative_path:
-            return ""
-        root = run_root.resolve()
-        target = (run_root / str(relative_path)).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError:
+        target = WebApp._artifact_path(run_root, relative_path)
+        if target is None:
             return ""
         if not target.is_file() or target.stat().st_size > 2 * 1024 * 1024:
             return ""
@@ -656,6 +826,18 @@ class WebApp:
             return target.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return ""
+
+    @staticmethod
+    def _artifact_path(run_root: Path, relative_path: Any) -> Path | None:
+        if not relative_path:
+            return None
+        root = run_root.resolve()
+        target = (run_root / str(relative_path)).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return None
+        return target
 
 
 def create_server(
@@ -666,9 +848,16 @@ def create_server(
     runs: str = "./runs",
     out: str = "./skills",
     catalog: str | Path | None = None,
+    assets_dir: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(config=config, runs=runs, out=out, catalog=catalog)
-    handler = _handler_for(app)
+    asset_root = Path(assets_dir).resolve() if assets_dir else None
+    if asset_root is not None:
+        required_assets = ("index.html", "app.css", "app.js", "react-nav.js")
+        missing = [name for name in required_assets if not (asset_root / name).is_file()]
+        if missing:
+            raise FileNotFoundError(f"前端静态资源不完整：{', '.join(missing)}")
+    handler = _handler_for(app, asset_root)
     return ThreadingHTTPServer((host, port), handler)
 
 
@@ -682,7 +871,7 @@ def serve(**kwargs: Any) -> None:
         server.server_close()
 
 
-def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
+def _handler_for(app: WebApp, asset_root: Path | None = None) -> type[BaseHTTPRequestHandler]:
     class RequestHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
@@ -750,8 +939,45 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     source=query.get("source", [""])[0],
                 )})
                 return
+            if path == "/api/agents":
+                try:
+                    self._send_json({"agents": app.list_agents()})
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
+            if path.startswith("/api/agents/") and path.endswith("/download"):
+                agent_id = unquote(path.removeprefix("/api/agents/").removesuffix("/download").strip("/"))
+                try:
+                    filename, payload = app.download_agent(agent_id)
+                except (FileNotFoundError, ValueError) as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._send_download(filename, payload)
+                return
+            if path.startswith("/api/agents/"):
+                agent_id = unquote(path.removeprefix("/api/agents/"))
+                try:
+                    self._send_json(app.get_agent(agent_id))
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                except ValueError as exc:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+                return
             if path.startswith("/api/results/"):
-                run_id = unquote(path.removeprefix("/api/results/"))
+                result_path = path.removeprefix("/api/results/")
+                parts = result_path.split("/")
+                if len(parts) == 3 and parts[1] == "download":
+                    run_id = unquote(parts[0])
+                    artifact_kind = unquote(parts[2])
+                    try:
+                        filename, content_type, payload = app.download_result(run_id, artifact_kind)
+                        self._send_download(filename, payload, content_type=content_type)
+                    except FileNotFoundError as exc:
+                        self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    except ValueError as exc:
+                        self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                run_id = unquote(result_path)
                 try:
                     self._send_json(app.get_result(run_id))
                 except FileNotFoundError as exc:
@@ -762,6 +988,13 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/topics":
                 self._send_json({"topics": app.list_topics()})
+                return
+            if path.startswith("/api/readiness-check/"):
+                job_id = unquote(path.removeprefix("/api/readiness-check/").strip("/"))
+                try:
+                    self._send_json(app.get_readiness_check(job_id))
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
                 return
             if path.startswith("/api/topics/") and path.endswith("/plan"):
                 run_id = unquote(path.removeprefix("/api/topics/").removesuffix("/plan").strip("/"))
@@ -804,6 +1037,18 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
 
         def do_DELETE(self) -> None:
             path = urlsplit(self.path).path
+            if path.startswith("/api/topics/"):
+                run_id = unquote(path.removeprefix("/api/topics/"))
+                try:
+                    payload = app.archive_topic(run_id)
+                except RuntimeError as exc:
+                    self._send_error_json(HTTPStatus.CONFLICT, str(exc))
+                    return
+                except FileNotFoundError as exc:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._send_json(payload)
+                return
             if path.startswith("/api/runs/"):
                 run_id = unquote(path.removeprefix("/api/runs/"))
                 try:
@@ -822,6 +1067,13 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             path = urlsplit(self.path).path
             try:
                 body = self._read_json_body()
+                if path == "/api/assemble":
+                    item_ids = body.get("item_ids", [])
+                    if not isinstance(item_ids, list) or not all(isinstance(value, str) for value in item_ids):
+                        raise ValueError("item_ids 必须是字符串数组")
+                    filename, payload = app.assemble_agent(item_ids, str(body.get("agent_name", "skill-seargen-agent")))
+                    self._send_download(filename, payload)
+                    return
                 if path == "/api/runs":
                     result = app.start_video(
                         str(body.get("url", "")),
@@ -905,11 +1157,26 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/mvp-check":
                     self._send_json(app.run_mvp_check(str(body.get("api_key", ""))))
                     return
+                if path == "/api/readiness-check/start":
+                    self._send_json(app.start_readiness_check(
+                        str(body.get("api_key", "")),
+                        bool(body.get("load_asr_model", True)),
+                    ), HTTPStatus.ACCEPTED)
+                    return
+                if path == "/api/readiness-check":
+                    self._send_json(app.run_readiness_check(
+                        str(body.get("api_key", "")),
+                        bool(body.get("load_asr_model", True)),
+                    ))
+                    return
                 if path == "/api/models":
                     self._send_json(app.list_models(str(body.get("api_key", ""))))
                     return
             except RuntimeError as exc:
                 self._send_error_json(HTTPStatus.CONFLICT, str(exc))
+                return
+            except PermissionError as exc:
+                self._send_error_json(HTTPStatus.FORBIDDEN, str(exc))
                 return
             except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
@@ -928,7 +1195,7 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             return value
 
         def _send_asset(self, name: str, content_type: str) -> None:
-            data = files("skill_gather.web_assets").joinpath(name).read_bytes()
+            data = (asset_root / name).read_bytes() if asset_root else files("skill_gather.web_assets").joinpath(name).read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
@@ -945,9 +1212,9 @@ def _handler_for(app: WebApp) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(data)
 
-        def _send_download(self, filename: str, payload: bytes) -> None:
+        def _send_download(self, filename: str, payload: bytes, *, content_type: str = "application/zip") -> None:
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")

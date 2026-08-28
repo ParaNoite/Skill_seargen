@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,16 @@ class ReleaseDecision:
 
 
 def choose_auto_sources(task: TopicTask) -> list[str]:
-    ranked = sorted(task.candidates, key=lambda item: (bool(item.risk_flags), -item.quality_score, item.candidate_id))
+    eligible = [
+        item
+        for item in task.candidates
+        if not _has_blocking_risk(item.risk_flags, task.topic)
+    ]
+    strong_eligible = [item for item in eligible if _is_strong_auto_source(item, task.topic)]
+    ranked = sorted(
+        strong_eligible or eligible,
+        key=lambda item: (-item.quality_score, len(item.risk_flags), item.candidate_id),
+    )
     selected: list[TopicSourceCandidate] = []
     preferred = ["web", "github", "video"] if task.mode == "technical" else ["web", "video"]
     for source_type in preferred:
@@ -31,6 +41,62 @@ def choose_auto_sources(task: TopicTask) -> list[str]:
         if candidate not in selected:
             selected.append(candidate)
     return [item.candidate_id for item in selected]
+
+
+def _has_blocking_risk(risk_flags: list[str], topic: str) -> bool:
+    blocking_markers = (
+        "spam",
+        "topic mismatch",
+        "主题不相关",
+        "not game-focused",
+    )
+    security_topic = any(
+        marker in topic.casefold()
+        for marker in ("隐身", "反检测", "指纹", "stealth", "anti-detection", "fingerprint")
+    )
+    context_markers = ("隐身", "规避", "反检测", "指纹", "stealth", "trace语义可能不符")
+    for flag in risk_flags:
+        lowered = str(flag).casefold()
+        if any(marker in lowered for marker in blocking_markers):
+            return True
+        if not security_topic and any(marker in lowered for marker in context_markers):
+            return True
+        if "playwright" in topic.casefold() and "缺少playwright" in lowered:
+            return True
+        if _is_browser_verification_topic(topic) and any(
+            marker in lowered
+            for marker in ("并非测试资料", "不是测试资料", "not testing material", "not test material")
+        ):
+            return True
+    return False
+
+
+def _is_strong_auto_source(candidate: TopicSourceCandidate, topic: str) -> bool:
+    if len(_topic_facets(topic)) < 5 or not _is_browser_verification_topic(topic):
+        return True
+    matched = [facet.casefold() for facet in candidate.matched_facets if str(facet).strip()]
+    if candidate.source_type == "github" and len(matched) < 2:
+        return False
+    if len(matched) == 1 and matched[0] in {"canvas", "webgl"}:
+        return False
+    return True
+
+
+def _is_browser_verification_topic(topic: str) -> bool:
+    lowered = topic.casefold()
+    return any(
+        marker in lowered
+        for marker in ("playwright", "验收", "trace", "测试", "test", "verification", "移动视口", "产物复核")
+    )
+
+
+def _topic_facets(topic: str) -> list[str]:
+    raw_facets = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,}|[\u4e00-\u9fff]{2,}", topic)
+    facets: list[str] = []
+    for facet in raw_facets:
+        if facet not in facets:
+            facets.append(facet)
+    return facets
 
 
 def evaluate_release_gate(task: TopicTask, fusion: dict[str, Any], score: dict[str, Any]) -> ReleaseDecision:

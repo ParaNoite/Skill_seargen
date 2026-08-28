@@ -403,12 +403,21 @@ class SearXNGProvider:
             raise SearchProviderError("未配置 search.searxng_base_url；请先部署并配置本地 SearXNG。", code="searxng_not_configured")
         started_at = _now()
         results: list[RawSearchResult] = []
+        unresponsive_engines: set[str] = set()
         for query in queries:
             params = urlencode({"q": query, "format": "json", "safesearch": 1, "language": "zh-CN"})
             payload = _get_json(f"{self.base_url}/search?{params}", timeout_sec=self.timeout_sec, headers={"User-Agent": "skill-seargen/0.4"})
             items = payload.get("results", []) if isinstance(payload, dict) else []
             if not isinstance(items, list):
                 raise SearchProviderError("SearXNG 未返回 JSON 搜索结果。", code="invalid_searxng_response")
+            failures = payload.get("unresponsive_engines", []) if isinstance(payload, dict) else []
+            if isinstance(failures, list):
+                for failure in failures:
+                    if isinstance(failure, list) and failure:
+                        engine = str(failure[0]).strip()
+                        reason = str(failure[1]).strip() if len(failure) > 1 else "unresponsive"
+                        if engine:
+                            unresponsive_engines.add(f"{engine}: {reason}")
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -430,7 +439,12 @@ class SearXNGProvider:
                     break
             if len(results) >= max_results:
                 break
-        return SearchBatch(self.name, queries, results, started_at=started_at, finished_at=_now())
+        warnings: list[str] = []
+        if unresponsive_engines:
+            warnings.append("unresponsive_engines: " + "; ".join(sorted(unresponsive_engines)))
+        if not results:
+            warnings.append("no_results: SearXNG 未返回任何候选结果")
+        return SearchBatch(self.name, queries, results, warnings=warnings, started_at=started_at, finished_at=_now())
 
 
 def provider_names_for_mode(mode: str) -> list[str]:
@@ -439,7 +453,7 @@ def provider_names_for_mode(mode: str) -> list[str]:
 
 def build_queries(topic: str, mode: str, provider: str, *, max_queries: int, extra_queries: list[str] | None = None) -> list[str]:
     base = topic.strip()
-    github_terms = _unique(re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]*", base))
+    github_terms = _github_query_terms(base)
     generic_github_terms = {
         "and", "architecture", "best", "communication", "decoupled", "failure",
         "handling", "implementation", "practices", "progress", "technical", "typed", "workflow",
@@ -452,7 +466,7 @@ def build_queries(topic: str, mode: str, provider: str, *, max_queries: int, ext
     identifier_terms = [
         term
         for term in focused_github_terms
-        if "_" in term or any(character.isupper() for character in term[1:]) or any(character.isdigit() for character in term)
+        if "." in term or "_" in term or any(character.isupper() for character in term[1:]) or any(character.isdigit() for character in term)
     ]
     focus = identifier_terms[:1] or focused_github_terms[:3]
     github_fallback = " ".join(
@@ -466,18 +480,45 @@ def build_queries(topic: str, mode: str, provider: str, *, max_queries: int, ext
         "searxng": [base, f"{base} 教程", f"{base} official documentation", f"{base} GitHub" if mode == "technical" else f"{base} 实践"],
         "fake": [base],
     }
+    provider_queries = templates.get(provider, [base])
+    expanded_queries = list(extra_queries or [])
+    if provider == "github":
+        expanded_queries.extend(
+            compact
+            for query in list(extra_queries or [])
+            if (compact := _compact_github_query(query)) and compact != query
+        )
+    prioritized_queries = provider_queries[:1] + expanded_queries + provider_queries[1:]
     result: list[str] = []
-    for query in templates.get(provider, [base]):
-        if query not in result:
-            result.append(query)
-    for query in extra_queries or []:
+    for query in prioritized_queries:
         if query not in result:
             result.append(query)
     return result[:max_queries]
 
 
+def _github_query_terms(value: str) -> list[str]:
+    return _unique(
+        re.findall(
+            r"(?<![A-Za-z0-9])(?:[A-Za-z][A-Za-z0-9_.+#-]*|[0-9]+[A-Za-z][A-Za-z0-9_.+#-]*)",
+            value,
+        )
+    )
+
+
+def _compact_github_query(value: str) -> str:
+    terms = _github_query_terms(value)
+    if len(terms) < 4:
+        return ""
+    return " ".join(terms[:4])
+
+
 def build_search_intent(topic: str, mode: str, client: NewApiClient | None, model: str, *, use_llm: bool) -> tuple[SearchIntent, str | None]:
-    facets = _unique(re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,}|[\u4e00-\u9fff]{2,}", topic))[:3]
+    raw_facets = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,}|[\u4e00-\u9fff]{2,}", topic)
+    expanded_facets: list[str] = []
+    for facet in raw_facets:
+        parts = re.split(r"[与和及]", facet) if re.fullmatch(r"[\u4e00-\u9fff]+", facet) else [facet]
+        expanded_facets.extend(part for part in parts if len(part) >= 2)
+    facets = _unique(expanded_facets)[:8]
     intent = SearchIntent(
         topic=topic,
         mode=mode,
@@ -494,8 +535,8 @@ def build_search_intent(topic: str, mode: str, client: NewApiClient | None, mode
     except NewApiError as exc:
         return intent, f"fallback:{exc.code}"
     intent.goal = enriched["goal"] or intent.goal
-    intent.facets = _unique(intent.facets + enriched["facets"])[:3]
-    intent.exclusions = _unique(intent.exclusions + enriched["exclusions"])[:3]
+    intent.facets = _unique(intent.facets + enriched["facets"])[:8]
+    intent.exclusions = _unique(intent.exclusions + enriched["exclusions"])[:6]
     intent.query_variants = [query for query in enriched["queries"] if query != topic][:2]
     intent.strategy = "newapi"
     return intent, None
@@ -666,9 +707,11 @@ def canonicalize_url(url: str) -> str:
 def infer_source_type(url: str) -> str:
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower()
-    if host in _BILIBILI_HOSTS or host.endswith(".bilibili.com"):
+    if host == "b23.tv":
         return "video"
     parts = [part for part in parsed.path.split("/") if part]
+    if (host in _BILIBILI_HOSTS or host.endswith(".bilibili.com")) and parts and parts[0].lower() == "video":
+        return "video"
     if host == "github.com" and len(parts) == 2:
         return "github"
     return "web" if host else "unknown"
@@ -810,7 +853,7 @@ def _get_text(url: str, *, timeout_sec: int, headers: dict[str, str]) -> str:
 
 
 def _cache_key(provider: str, queries: list[str], max_results: int) -> str:
-    raw = json.dumps({"schema": 1, "provider": provider, "queries": queries, "max_results": max_results}, ensure_ascii=False, sort_keys=True)
+    raw = json.dumps({"schema": 2, "provider": provider, "queries": queries, "max_results": max_results}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

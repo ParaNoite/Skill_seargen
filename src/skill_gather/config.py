@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,15 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class NewApiRequestProfile:
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NewApiConfig:
     base_url: str
     api_key_env: str
@@ -21,6 +30,8 @@ class NewApiConfig:
     asr_model: str
     distiller_model: str
     judge_model: str
+    timeout_sec: int = 180
+    request_profiles: dict[str, NewApiRequestProfile] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,10 +110,72 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         provider=provider,
         output_dir=defaults.get("output_dir", "./skills"),
         run_dir=defaults.get("run_dir", "./runs"),
-        newapi=NewApiConfig(**{key: newapi_raw[key] for key in required}),
+        newapi=NewApiConfig(
+            **{key: newapi_raw[key] for key in required},
+            timeout_sec=_parse_positive_int(newapi_raw.get("timeout_sec", 180), "newapi.timeout_sec"),
+            request_profiles=_parse_request_profiles(newapi_raw.get("request_profiles", {})),
+        ),
         topic_defaults=topic_defaults,
         search=_parse_search_config(raw.get("search", {})),
     )
+
+
+def _parse_positive_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{field_name} 必须是正整数")
+    return value
+
+
+def _parse_request_profiles(raw: Any) -> dict[str, NewApiRequestProfile]:
+    if raw in ({}, None):
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("newapi.request_profiles 必须是对象")
+
+    profiles: dict[str, NewApiRequestProfile] = {}
+    allowed = {
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "reasoning_effort",
+    }
+    for name, profile_raw in raw.items():
+        if not isinstance(profile_raw, dict):
+            raise ConfigError(f"newapi.request_profiles.{name} 必须是对象")
+        unknown = sorted(set(profile_raw) - allowed)
+        if unknown:
+            raise ConfigError(
+                f"newapi.request_profiles.{name} 包含不支持的字段：{', '.join(unknown)}"
+            )
+
+        values = dict(profile_raw)
+        for key in ("temperature", "top_p"):
+            if key in values:
+                value = values[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 2:
+                    raise ConfigError(
+                        f"newapi.request_profiles.{name}.{key} 必须是 0 到 2 之间的数字"
+                    )
+                values[key] = float(value)
+        for key in ("max_tokens", "max_completion_tokens"):
+            if key in values:
+                values[key] = _parse_positive_int(
+                    values[key], f"newapi.request_profiles.{name}.{key}"
+                )
+        if "max_tokens" in values and "max_completion_tokens" in values:
+            raise ConfigError(
+                f"newapi.request_profiles.{name} 不能同时设置 max_tokens 和 max_completion_tokens"
+            )
+        if "reasoning_effort" in values:
+            effort = str(values["reasoning_effort"]).strip()
+            if effort not in {"minimal", "low", "medium", "high"}:
+                raise ConfigError(
+                    f"newapi.request_profiles.{name}.reasoning_effort 必须是 minimal、low、medium 或 high"
+                )
+            values["reasoning_effort"] = effort
+        profiles[str(name)] = NewApiRequestProfile(**values)
+    return profiles
 
 
 def _parse_topic_defaults(raw: Any) -> TopicDefaults:

@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+import shutil
 from typing import Any
+from urllib.parse import urlsplit
 
 from .models import (
     TOPIC_RUN_STATUSES,
@@ -80,6 +82,7 @@ class TopicRunStore:
                 sources=f"{package_root}/sources.json",
                 evidence=f"{package_root}/evidence",
                 references=f"{package_root}/references",
+                course=f"{package_root}/COURSE.md",
                 knowledge=None,
                 fusion=f"{package_root}/fusion.json",
                 skill=f"{package_root}/SKILL.md" if mode == "technical" else None,
@@ -172,9 +175,31 @@ class TopicRunStore:
         self._normalize_optional_artifacts(task)
         return task
 
+    def archive(self, run_id: str, archive_root: str | Path) -> Path:
+        task = self.load(run_id)
+        run_path = self.run_path(run_id)
+        if run_path.name != task.run_id or safe_slug(task.run_id) != task.run_id:
+            raise ValueError("主题运行目录校验失败")
+
+        archive_path = Path(archive_root)
+        archive_path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        destination = archive_path / f"{timestamp}-{task.run_id}"
+        shutil.move(str(run_path), str(destination))
+        return destination
+
     def _normalize_optional_artifacts(self, task: TopicTask) -> None:
         """Keep optional package entries aligned with files on disk, including old runs."""
         package = task.package
+        if package is None or not package.course:
+            task.artifacts.pop("course", None)
+        else:
+            course_path = self.run_path(task.run_id) / package.course
+            if course_path.exists():
+                task.artifacts.setdefault("course", package.course)
+            else:
+                task.artifacts.pop("course", None)
+
         if package is None or not package.knowledge:
             task.artifacts.pop("knowledge", None)
         else:
@@ -335,21 +360,33 @@ class TopicRunStore:
         self.save(task)
         return task
 
-    def select_candidates(self, run_id: str, candidate_ids: list[str]) -> TopicTask:
+    def select_candidates(
+        self,
+        run_id: str,
+        candidate_ids: list[str],
+        external_urls: list[str] | None = None,
+    ) -> TopicTask:
         task = self.load(run_id)
         if task.status != "awaiting_selection":
             raise ValueError("只有等待选择的主题任务可以确认候选")
         selected_ids = list(dict.fromkeys(candidate_id.strip() for candidate_id in candidate_ids if candidate_id.strip()))
+        external_candidates = [_external_candidate(url, task.topic) for url in (external_urls or [])]
+        for candidate in external_candidates:
+            if candidate.candidate_id not in selected_ids:
+                selected_ids.append(candidate.candidate_id)
         if not selected_ids:
             raise ValueError("至少选择一个候选来源")
         if len(selected_ids) > task.budget.max_selected_sources:
             raise ValueError(f"最多只能选择 {task.budget.max_selected_sources} 个来源")
         candidates = {candidate.candidate_id: candidate for candidate in task.candidates}
+        candidates.update({candidate.candidate_id: candidate for candidate in external_candidates})
         unknown = [candidate_id for candidate_id in selected_ids if candidate_id not in candidates]
         if unknown:
             raise ValueError(f"找不到候选来源：{', '.join(unknown)}")
         confirmed_at = datetime.now(UTC).isoformat()
         selected: list[TopicSourceCandidate] = []
+        existing_ids = {candidate.candidate_id for candidate in task.candidates}
+        task.candidates.extend(candidate for candidate in external_candidates if candidate.candidate_id not in existing_ids)
         for candidate in task.candidates:
             candidate.selected = candidate.candidate_id in selected_ids
             candidate.confirmed_at = confirmed_at if candidate.selected else None
@@ -417,3 +454,35 @@ def _budget_violation(budget: TopicBudget, usage: TopicUsage) -> str | None:
         if used > limit:
             return f"{usage_name}={used} 超过 {limit_name}={limit}"
     return None
+
+
+def _external_candidate(url: str, topic: str) -> TopicSourceCandidate:
+    value = url.strip()
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"公开来源 URL 必须是完整 HTTP(S) 地址：{url}")
+    host = (parsed.hostname or "").lower()
+    if host == "github.com":
+        source_type = "github"
+    elif host == "bilibili.com" or host.endswith(".bilibili.com"):
+        source_type = "video"
+    else:
+        source_type = "web"
+    digest = sha256(value.encode("utf-8")).hexdigest()[:12]
+    return TopicSourceCandidate(
+        url=value,
+        canonical_url=value,
+        title=value,
+        summary="",
+        source_type=source_type,
+        query=topic,
+        relevance_reason="监工显式确认的公开来源；后续由真实处理器提取证据。",
+        risk_flags=["explicit_url_pending_processing"],
+        candidate_id=f"external-{digest}",
+        host=host,
+        quality_score=50,
+        providers=["explicit_url"],
+        engines=["explicit_url"],
+        queries=[topic],
+        assessment_source="explicit_url",
+    )

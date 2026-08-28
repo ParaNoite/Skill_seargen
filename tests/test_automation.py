@@ -28,6 +28,91 @@ class AutomationTests(unittest.TestCase):
             ]
             self.assertEqual(choose_auto_sources(task)[:3], ["web", "repo", "video"])
 
+    def test_auto_selection_keeps_relevant_cautionary_source_and_rejects_topic_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task = TopicRunStore(directory).start_or_resume("HTML Canvas game", mode="technical", execution_mode="auto")
+            task.candidates = [
+                TopicSourceCandidate(
+                    url="https://www.bilibili.com/video/BVgame",
+                    candidate_id="relevant-video",
+                    source_type="video",
+                    quality_score=68,
+                    risk_flags=["video source", "no summary", "features unverified"],
+                ),
+                TopicSourceCandidate(
+                    url="https://github.com/example/html2canvas",
+                    candidate_id="wrong-repo",
+                    source_type="github",
+                    quality_score=70,
+                    risk_flags=["topic mismatch", "not game-focused"],
+                ),
+                TopicSourceCandidate(
+                    url="https://developer.mozilla.org/canvas",
+                    candidate_id="docs",
+                    source_type="web",
+                    quality_score=65,
+                ),
+            ]
+
+            selected = choose_auto_sources(task)
+
+            self.assertEqual(selected, ["docs", "relevant-video"])
+            self.assertNotIn("wrong-repo", selected)
+
+    def test_auto_selection_skips_broad_webgl_repos_on_complex_browser_verification_topic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task = TopicRunStore(directory).start_or_resume(
+                "Playwright 浏览器验收：Canvas WebGL 交互、移动视口、Trace 与产物复核",
+                mode="technical",
+                execution_mode="auto",
+            )
+            task.candidates = [
+                TopicSourceCandidate(
+                    url="https://github.com/managedcode/playwright_stealth",
+                    candidate_id="stealth",
+                    source_type="github",
+                    quality_score=95,
+                    matched_facets=["Playwright", "Canvas", "WebGL"],
+                    risk_flags=["主题偏向隐身规避"],
+                ),
+                TopicSourceCandidate(
+                    url="https://cloud.tencent.com/developer/article/2541463",
+                    candidate_id="docs",
+                    source_type="web",
+                    quality_score=72,
+                    matched_facets=["Playwright", "浏览器验收", "Trace"],
+                ),
+                TopicSourceCandidate(
+                    url="https://www.bilibili.com/video/BV1oNR7B5ECs/",
+                    candidate_id="video",
+                    source_type="video",
+                    quality_score=68,
+                    matched_facets=["Playwright", "浏览器验收"],
+                ),
+                TopicSourceCandidate(
+                    url="https://github.com/regl-project/regl",
+                    candidate_id="generic-webgl",
+                    source_type="github",
+                    quality_score=100,
+                    matched_facets=["WebGL"],
+                ),
+                TopicSourceCandidate(
+                    url="https://github.com/jagenjo/webglstudio.js",
+                    candidate_id="not-testing-material",
+                    source_type="github",
+                    quality_score=90,
+                    matched_facets=["WebGL", "交互"],
+                    risk_flags=["缺少Playwright", "并非测试资料"],
+                ),
+            ]
+
+            selected = choose_auto_sources(task)
+
+            self.assertEqual(selected, ["docs", "video"])
+            self.assertNotIn("stealth", selected)
+            self.assertNotIn("generic-webgl", selected)
+            self.assertNotIn("not-testing-material", selected)
+
     def test_release_gate_downgrades_single_source_conflicts_and_budget(self):
         with tempfile.TemporaryDirectory() as directory:
             task = TopicRunStore(directory).start_or_resume("Godot NavigationAgent3D", execution_mode="auto")

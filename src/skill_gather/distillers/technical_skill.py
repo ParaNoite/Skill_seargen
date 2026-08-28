@@ -97,8 +97,12 @@ def score_technical_package(
         task.topic,
         [item for item in fusion.get("conclusions", []) if isinstance(item, dict)],
     )
-    docs = 50 if (task.package and (skill_path.parent / "knowledge.md").exists()) else 0
-    docs += 40 if reference_index.exists() else 0
+    course_path = skill_path.parent / "COURSE.md"
+    course_text = course_path.read_text(encoding="utf-8") if course_path.exists() else ""
+    course_checks = ("## 学完你能获得什么" in course_text, "## 跟着内容学习" in course_text, "## 自测" in course_text)
+    docs = 30 if (task.package and (skill_path.parent / "knowledge.md").exists()) else 0
+    docs += 30 if all(course_checks) else 0
+    docs += 30 if reference_index.exists() else 0
     docs += 10 if materials else 0
     docs = min(100, docs)
     skill_text = skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
@@ -282,8 +286,11 @@ def _rank_procedures(conclusions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _is_procedural_claim(claim: str) -> bool:
-    lower = _without_step_prefix(claim.strip().lower())
-    if not claim.strip() or claim.count("(") != claim.count(")"):
+    clean = claim.strip()
+    lower = _without_step_prefix(clean.lower())
+    if not clean or claim.count("(") != claim.count(")"):
+        return False
+    if _looks_like_spoken_retrospective(clean):
         return False
     if any(marker in lower for marker in ("in this article", "this tutorial", "this section", "本文", "本节介绍", "本章")):
         return False
@@ -312,6 +319,24 @@ def _is_procedural_claim(claim: str) -> bool:
     if "必须使用" in claim and _api_calls(claim):
         return True
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*\s*\([^\r\n]*\)\s*;?", claim.strip()))
+
+
+def _looks_like_spoken_retrospective(claim: str) -> bool:
+    """Reject transcript-like reflections that only happen to begin with an action verb."""
+    clean = claim.strip()
+    explicit_step = _explicit_step_order(clean) < 99
+    if explicit_step or _api_calls(clean):
+        return False
+    if len(clean) > 220:
+        return True
+    spoken_markers = (
+        "一个收获", "我对", "我也", "我觉得", "我不知道", "后续", "以后",
+        "有兴趣", "小伙伴", "可以给我", "大家可以", "其实", "肯定", "就是说",
+    )
+    marker_count = sum(marker in clean for marker in spoken_markers)
+    clause_count = len(re.findall(r"[，。！？；]", clean))
+    first_person_count = len(re.findall(r"(?:^|[，。！？；])\s*我", clean))
+    return marker_count >= 2 or (clause_count >= 5 and first_person_count >= 1)
 
 
 def _procedure_priority(claim: str) -> int:
@@ -444,7 +469,7 @@ def _yaml_string(value: str) -> str:
 
 
 def _api_calls(claim: str) -> list[str]:
-    values = re.findall(r"\b((?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*)\s*\(", claim)
+    values = re.findall(r"\b((?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*)\(", claim)
     return list(dict.fromkeys(value for value in values if value.lower() not in {"if", "for", "while", "print"}))
 
 
@@ -530,9 +555,15 @@ def _write_reference_index(
         lines.append("No source mapping is available. Do not treat this package as verified.")
     for source_id, record in sorted(records.items()):
         candidate_id = record.get("candidate_id", "")
-        reference_path = references_dir / f"{candidate_id}.txt"
+        exact_reference = references_dir / f"{candidate_id}.txt"
+        reference_matches = sorted(
+            path
+            for path in references_dir.glob(f"*{candidate_id}*")
+            if path.is_file() and path.name != "index.md" and path.suffix.lower() in {".md", ".txt"}
+        ) if candidate_id else []
+        reference_path = exact_reference if exact_reference.exists() else (reference_matches[0] if reference_matches else None)
         title = record.get("title") or candidate_id or "Untitled source"
-        if candidate_id and reference_path.exists():
+        if reference_path is not None:
             lines.append(f"- **{source_id}**: [{title}]({reference_path.name})")
         else:
             lines.append(f"- **{source_id}**: {title} (local reference unavailable)")
@@ -548,11 +579,22 @@ def _useful_claim(claim: str) -> bool:
     clean = claim.strip()
     if clean.startswith(("![", "[")):
         return False
+    if _is_environment_observation(clean.lower()):
+        return False
     if _api_calls(clean) and _is_procedural_claim(clean):
         return True
     if _explicit_step_order(clean) < 99 and _is_procedural_claim(clean):
         return True
     return len(clean) >= 30 or len(re.findall(r"[\u4e00-\u9fff]", clean)) >= 8
+
+
+def _is_environment_observation(lowered: str) -> bool:
+    markers = (
+        "browser tab", "tab title", "taskbar", "system clock", "the date", "address bar",
+        "local-network", "local network", "port 5173", "not secure", "insecure", "watermark",
+        "new tab", "visual studio code icon", "microsoft edge icon",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def _extract_command(value: str) -> str:

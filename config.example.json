@@ -1,12 +1,44 @@
 {
   "providers": {
     "newapi": {
-      "base_url": "https://api.renice.cc/v1",
+      "base_url": "https://api.example.test/v1",
       "api_key_env": "NEWAPI_API_KEY",
-      "vision_model": "gpt-4o-mini",
+      "vision_model": "gpt-5.6-sol",
       "asr_model": "faster-whisper:large-v3-turbo",
-      "distiller_model": "gpt-4o-mini",
-      "judge_model": "gpt-4o-mini"
+      "distiller_model": "gpt-5.6-sol",
+      "judge_model": "gpt-5.6-sol",
+      "timeout_sec": 240,
+      "request_profiles": {
+        "probe": {
+          "temperature": 0.0,
+          "max_tokens": 128
+        },
+        "vision": {
+          "temperature": 0.0,
+          "top_p": 0.9,
+          "max_tokens": 1200
+        },
+        "search": {
+          "temperature": 0.2,
+          "top_p": 0.9,
+          "max_tokens": 900
+        },
+        "course": {
+          "temperature": 0.3,
+          "top_p": 0.9,
+          "max_tokens": 3500
+        },
+        "skill": {
+          "temperature": 0.2,
+          "top_p": 0.9,
+          "max_tokens": 2500
+        },
+        "judge": {
+          "temperature": 0.0,
+          "top_p": 0.8,
+          "max_tokens": 1200
+        }
+      }
     }
   },
   "defaults": {
@@ -15,12 +47,12 @@
     "run_dir": "./runs"
   },
   "topic_defaults": {
-    "max_candidates": 20,
-    "max_selected_sources": 5,
-    "max_video_duration_sec": 3600,
-    "max_model_calls": 100,
-    "max_estimated_cost_usd": 10.0,
-    "max_runtime_sec": 3600,
+    "max_candidates": 40,
+    "max_selected_sources": 12,
+    "max_video_duration_sec": 7200,
+    "max_model_calls": 240,
+    "max_estimated_cost_usd": 40.0,
+    "max_runtime_sec": 10800,
     "reuse_cache": true,
     "refresh_cache": false,
     "judge_difficulty": "standard"

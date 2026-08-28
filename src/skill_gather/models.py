@@ -345,6 +345,7 @@ class TopicPackage:
     sources: str
     evidence: str
     references: str
+    course: str | None = None
     knowledge: str | None = None
     fusion: str | None = None
     skill: str | None = None

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 大学 | 教务系统</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="react-nav"></div>
+
+  <main id="workspace-root" class="workspace-root" hidden>
+    <section id="operation-progress" class="operation-progress idle" aria-live="polite">
+      <div class="operation-copy"><strong id="operation-title">就绪</strong><span id="operation-detail">等待操作</span></div>
+      <div class="operation-meter" aria-hidden="true"><span id="operation-meter-fill"></span></div>
+      <span id="operation-time" class="run-meta"></span>
+    </section>
+    <header class="workspace-header">
+      <div><p class="section-kicker">AI UNIVERSITY / ACADEMIC OFFICE</p><h1>AI 大学教务工作台</h1><p>在同一套可恢复流程中完成选课、学习、考试与毕业审核。</p></div>
+      <div class="workspace-actions">
+        <button id="readiness-button" class="button primary" type="button">检查学校运行状态</button>
+        <button id="check-button" class="button secondary" type="button">运行自检</button>
+      </div>
+    </header>
+    <section id="readiness-panel" class="readiness-panel" hidden></section>
+    <section class="engine-overview" aria-label="AI 大学培养流程">
+      <article class="engine-track search-track"><div><span>SEARCH / 01</span><strong>招生与选课</strong></div><p>视频 · 网页 · GitHub</p></article>
+      <article class="engine-track generate-track"><div><span>GENERATE / 02</span><strong>上课与学习</strong></div><p>证据 · 课程 · Skill</p></article>
+      <article class="engine-track exam-track"><div><span>JUDGE / 03</span><strong>考试与成绩</strong></div><p>评分 · 风险 · 边界</p></article>
+      <article class="engine-track career-track"><div><span>GRADUATION / 04</span><strong>毕业与就业</strong></div><p>Skill · Agent · 岗位</p></article>
+    </section>
+    <nav class="workspace-tabs" aria-label="工作台视图">
+      <button class="nav-tab active" data-view="operations" type="button">教务总览</button>
+      <button class="nav-tab" data-view="research" type="button">选课与研究</button>
+      <button class="nav-tab" data-view="results" type="button">考试与成绩</button>
+    </nav>
+    <div class="shell">
+    <section id="operations-view" class="view-panel" aria-labelledby="operations-title">
+      <div class="section-heading"><div><p class="eyebrow">教务总览</p><h1 id="operations-title">学生任务与课程运行指标</h1></div><button id="metrics-refresh" class="button secondary" type="button">刷新教务数据</button></div>
+      <div id="metrics-grid" class="detail-grid"><div class="metric"><div class="metric-label">正在加载</div><div class="metric-value">-</div></div></div>
+      <div id="operations-list" class="runs-list" aria-live="polite"></div>
+    </section>
+    <section id="results-view" class="view-panel" hidden aria-labelledby="results-title">
+      <div class="section-heading"><div><p class="eyebrow">学生成绩单</p><h1 id="results-title">课程、成绩与毕业能力</h1></div><div class="result-filters"><select id="results-type" aria-label="结果类型"><option value="all">全部类型</option><option value="video">实践课</option><option value="topic">研究课</option><option value="skill">毕业 Skill</option></select><select id="results-status" aria-label="结果状态"><option value="all">全部状态</option><option value="passed">毕业通过</option><option value="needs_review">待复核</option><option value="failed">挂科</option></select><input id="results-score" type="number" min="0" max="100" value="0" aria-label="最低评分" placeholder="最低成绩"><input id="results-risk" aria-label="风险标记" placeholder="风险标记"><input id="results-source" aria-label="来源" placeholder="教材来源"><button id="results-compare" class="button secondary" type="button">比较成绩</button><button id="results-export" class="button secondary" type="button">导出档案</button></div></div>
+      <div id="results-list" class="runs-list"><div class="loading">选择结果页签后加载。</div></div>
+      <div id="results-detail" class="result-detail" aria-live="polite"></div>
+    </section>
+    <section class="topic-panel research-view" hidden aria-labelledby="topic-title">
+      <div class="topic-heading">
+        <div>
+          <p class="eyebrow">研究课选课</p>
+          <h1 id="topic-title">先选教材，再进入课堂</h1>
+        </div>
+        <form id="topic-form" class="topic-form">
+          <input id="topic-input" name="topic" type="text" placeholder="例如：Godot 导航" required>
+          <select id="topic-mode" name="mode" aria-label="主题模式">
+            <option value="normal">普通模式</option>
+            <option value="technical">技术模式</option>
+          </select>
+          <select id="topic-execution-mode" name="execution_mode" aria-label="执行模式"><option value="manual">手动确认</option><option value="auto">自动执行</option></select>
+          <label class="check-label"><input id="topic-fake" name="fake" type="checkbox"> 离线 fake</label>
+          <button class="button primary" type="submit">开设课程</button>
+        </form>
+      </div>
+      <p id="topic-message" class="form-message" role="status"></p>
+      <div class="topic-workspace">
+        <aside id="topics-list" class="topics-list" aria-live="polite"><div class="loading compact">还没有研究课程。</div></aside>
+        <section id="topic-detail" class="topic-detail" aria-live="polite"><div class="muted">开设课程后，这里会显示候选教材。</div></section>
+      </div>
+    </section>
+
+    <section class="submit-panel research-view" hidden aria-labelledby="submit-title">
+      <div>
+        <p class="eyebrow">新建实践课</p>
+        <h1 id="submit-title">从公开视频学习可复核能力</h1>
+      </div>
+      <form id="video-form">
+        <div class="form-fields">
+          <div>
+            <label for="api-key">NewAPI API Key</label>
+            <div class="input-row">
+              <input id="api-key" name="api_key" type="password" placeholder="sk-..." autocomplete="off">
+              <button id="models-button" class="button secondary" type="button">查询授课模型</button>
+            </div>
+            <div id="models-panel" class="models-panel" hidden></div>
+          </div>
+          <div>
+            <label for="judge-difficulty">考试难度</label>
+            <select id="judge-difficulty" name="judge_difficulty">
+              <option value="standard" selected>标准</option>
+              <option value="lenient">宽松</option>
+              <option value="strict">严格</option>
+              <option value="off">关闭 Judge</option>
+            </select>
+          </div>
+          <div><label for="video-execution-mode">修读模式</label><select id="video-execution-mode" name="execution_mode"><option value="manual">手动</option><option value="auto">自动</option></select></div>
+          <div>
+            <label for="video-url">B 站公开视频 URL</label>
+            <div class="input-row">
+              <input id="video-url" name="url" type="url" placeholder="https://www.bilibili.com/video/BV..." required autocomplete="url">
+              <button id="submit-button" class="button primary" type="submit">开始修读</button>
+            </div>
+          </div>
+        </div>
+        <p id="form-message" class="form-message" role="status"></p>
+      </form>
+    </section>
+
+    <section class="workspace research-view" hidden>
+      <aside class="runs-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Runs</p>
+            <h2>课程记录</h2>
+          </div>
+          <button id="refresh-button" class="icon-button" type="button" aria-label="刷新课程记录" title="刷新">↻</button>
+        </div>
+        <div id="runs-list" class="runs-list" aria-live="polite"></div>
+      </aside>
+
+      <section id="detail-panel" class="detail-panel" aria-live="polite">
+        <div class="empty-state">
+          <span class="empty-icon">◎</span>
+          <h2>选择一条课程记录</h2>
+          <p>学习状态、考试成绩与证据摘要会显示在这里。</p>
+        </div>
+      </section>
+    </section>
+    </div>
+  </main>
+
+  <div id="artifact-preview" class="artifact-preview" hidden>
+    <button id="artifact-preview-backdrop" class="artifact-preview-backdrop" type="button" aria-label="关闭产物预览"></button>
+    <section class="artifact-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-preview-title">
+      <header class="artifact-preview-header">
+        <div><p class="eyebrow">课程产物预览</p><h2 id="artifact-preview-title">产物</h2><p id="artifact-preview-meta" class="run-meta"></p></div>
+        <button id="artifact-preview-close" class="icon-button" type="button" aria-label="关闭产物预览" title="关闭">×</button>
+      </header>
+      <div id="artifact-preview-tabs" class="artifact-preview-tabs" role="tablist" aria-label="产物类型">
+        <button class="artifact-preview-tab active" data-artifact-mode="course" type="button" role="tab">给人看的课程</button>
+        <button class="artifact-preview-tab" data-artifact-mode="skill" type="button" role="tab">Agent Skill</button>
+      </div>
+      <pre id="artifact-preview-content" class="artifact-preview-content" tabindex="0"></pre>
+      <footer class="artifact-preview-actions">
+        <a id="artifact-download-course" class="button secondary" download>下载课程文档</a>
+        <a id="artifact-download-skill" class="button primary" download>下载 Skill 包</a>
+      </footer>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/react-nav.js" type="module"></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,15 @@ def run_offline_acceptance(
         raise ValueError("v1.0 固定验收集缺少覆盖项：" + ", ".join(missing))
 
     config = load_config(config_path)
+    # Offline acceptance must never inherit optional remote LLM enhancements.
+    config = replace(
+        config,
+        search=replace(
+            config.search,
+            use_newapi_query_expansion=False,
+            use_newapi_candidate_assessment=False,
+        ),
+    )
     store = TopicRunStore(runs_path)
     results: list[dict[str, Any]] = []
     for case in cases:

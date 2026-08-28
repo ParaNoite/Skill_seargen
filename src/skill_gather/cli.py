@@ -11,6 +11,15 @@ from .adapters.bilibili import build_initial_manifest
 from .automation import persist_release_gate
 from .acceptance import run_offline_acceptance
 from .config import ConfigError, load_config
+from .capture import (
+    CAPTURE_EVENTS,
+    CaptureIndex,
+    index_path as capture_index_path,
+    load_capture_index,
+    register_capture,
+    render_offline_showcase,
+    select_showcase_frames,
+)
 from .evaluation import HUMAN_LABEL_STATUSES, build_quality_report
 from .github_processing import process_github_sources
 from .models import (
@@ -29,10 +38,12 @@ from .search import SearchProviderError, search_topic
 from .source import SourceInferenceError, infer_source
 from .topic_processing import process_web_sources
 from .distillers.technical_skill import apply_topic_human_review, generate_technical_skill, rescore_technical_package
-from .integrations.newapi import NewApiClient
+from .integrations.newapi import NewApiClient, NewApiError
+from .supervisor import SupervisorConfigError, SupervisorStore, load_supervisor_config
 from .pipeline.topic_fusion import fuse_topic_evidence, write_fusion_artifacts
 from .topic_videos import process_topic_videos
 from .topics import TopicRunStore
+from .game_hatch import GameHatchError, run_game_hatch
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     topic_select = topic_commands.add_parser("select", help="确认主题候选来源")
     topic_select.add_argument("run_id")
     topic_select.add_argument("candidate_ids", nargs="+", help="一个或多个候选 ID")
+    topic_select.add_argument("--url", dest="external_urls", action="append", default=[], help="显式确认一个公开 HTTP(S) 来源 URL，可重复")
     topic_select.add_argument("--runs", default="./runs", help="主题 run 状态目录")
     topic_select.set_defaults(handler=handle_topic_select)
 
@@ -196,15 +208,90 @@ def build_parser() -> argparse.ArgumentParser:
     model_check.add_argument("--config", default="config.json", help="配置文件路径")
     model_check.set_defaults(handler=handle_model_check)
 
+    game_hatch = subcommands.add_parser("game-hatch", help="运行 TED 浏览器游戏孵化子 Agent")
+    game_hatch.add_argument("task", help="交给游戏孵化 Agent 的任务")
+    game_hatch.add_argument("--config", default="configs/skill-gather.example.json")
+    game_hatch.add_argument("--model", default="claude-haiku-4-5-20251001")
+    game_hatch.add_argument("--report-dir", default=".agent-lab/game-hatch")
+    game_hatch.set_defaults(handler=handle_game_hatch)
+
+    supervise = subcommands.add_parser("supervise", help="查看和维护 Codex 自主监工状态")
+    supervise_commands = supervise.add_subparsers(dest="supervise_command", required=True)
+    supervise_run = supervise_commands.add_parser("run", help="一键创建或恢复监工任务，随后由 Codex 主 Agent 执行监督循环")
+    supervise_run.add_argument("--config", default="configs/ted-supervisor.json")
+    supervise_run.add_argument("--lab", default=".agent-lab/supervisor")
+    supervise_run.set_defaults(handler=handle_supervise_run)
+    supervise_start = supervise_commands.add_parser("start", help="创建或恢复监工任务")
+    supervise_start.add_argument("--config", default="configs/ted-supervisor.json")
+    supervise_start.add_argument("--lab", default=".agent-lab/supervisor")
+    supervise_start.add_argument("--id", default="")
+    supervise_start.set_defaults(handler=handle_supervise_start)
+    supervise_status = supervise_commands.add_parser("status", help="读取监工任务状态")
+    supervise_status.add_argument("supervision_id")
+    supervise_status.add_argument("--lab", default=".agent-lab/supervisor")
+    supervise_status.set_defaults(handler=handle_supervise_status)
+    supervise_theme = supervise_commands.add_parser("theme", help="登记监工自主选择的主题")
+    supervise_theme.add_argument("supervision_id")
+    supervise_theme.add_argument("topic")
+    supervise_theme.add_argument("--reason", required=True)
+    supervise_theme.add_argument("--utility-score", type=int, default=0)
+    supervise_theme.add_argument("--signal", action="append", default=[])
+    supervise_theme.add_argument("--ted-relevance-score", type=int, default=0)
+    supervise_theme.add_argument("--beat", dest="narrative_beats", action="append", default=[])
+    supervise_theme.add_argument("--showcase-reason", default="")
+    supervise_theme.add_argument("--artifact", dest="expected_artifacts", action="append", default=[])
+    supervise_theme.add_argument("--lab", default=".agent-lab/supervisor")
+    supervise_theme.set_defaults(handler=handle_supervise_theme)
+    supervise_capture = supervise_commands.add_parser("capture", help="登记一次监督截图或 Playwright Trace")
+    supervise_capture.add_argument("supervision_id")
+    supervise_capture.add_argument("--theme-id", required=True)
+    supervise_capture.add_argument("--topic", required=True)
+    supervise_capture.add_argument("--stage", required=True)
+    supervise_capture.add_argument("--event", required=True, choices=sorted(CAPTURE_EVENTS))
+    supervise_capture.add_argument("--source", choices=["playwright", "artifact_preview"], default="playwright")
+    supervise_capture.add_argument("--screenshot", default="")
+    supervise_capture.add_argument("--trace", default="")
+    supervise_capture.add_argument("--url", default="")
+    supervise_capture.add_argument("--beat", dest="narrative_beats", action="append", default=[])
+    supervise_capture.add_argument("--showcase-reason", default="")
+    supervise_capture.add_argument("--narrative-score", type=int, default=0)
+    supervise_capture.add_argument("--information-score", type=int, default=0)
+    supervise_capture.add_argument("--visual-score", type=int, default=0)
+    supervise_capture.add_argument("--evidence-score", type=int, default=0)
+    supervise_capture.add_argument("--artifact", dest="artifact_paths", action="append", default=[])
+    supervise_capture.add_argument("--page-text", default="")
+    supervise_capture.add_argument("--lab", default=".agent-lab/supervisor")
+    supervise_capture.set_defaults(handler=handle_supervise_capture)
+    supervise_showcase = supervise_commands.add_parser("showcase", help="筛选并生成离线 TED 展示素材")
+    supervise_showcase.add_argument("supervision_id")
+    supervise_showcase.add_argument("--lab", default=".agent-lab/supervisor")
+    supervise_showcase.set_defaults(handler=handle_supervise_showcase)
+
     web = subcommands.add_parser("web", help="启动本地 Web 界面")
     web.add_argument("--config", default="config.json", help="配置文件路径")
     web.add_argument("--out", default="./skills", help="候选 skill 输出目录")
     web.add_argument("--runs", default="./runs", help="run 状态目录")
     web.add_argument("--host", default="127.0.0.1", help="监听地址")
     web.add_argument("--port", type=int, default=8765, help="监听端口")
+    web.add_argument("--assets-dir", default="", help="可选的前端静态资源目录")
     web.set_defaults(handler=handle_web)
 
     return parser
+
+
+def handle_game_hatch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        result = run_game_hatch(
+            args.task,
+            config_path=args.config,
+            model=args.model,
+            report_dir=args.report_dir,
+        )
+    except (GameHatchError, ConfigError, FileNotFoundError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    print(json.dumps({"model": result.model, "report": str(result.report_path), "output": result.final_output}, ensure_ascii=False), file=stdout)
+    return 0
 
 
 def handle_web(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -228,7 +315,13 @@ def handle_web(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
 
 def _create_web_server(create_server: Any, args: argparse.Namespace) -> Any:
-    kwargs = {"host": args.host, "config": args.config, "runs": args.runs, "out": args.out}
+    kwargs = {
+        "host": args.host,
+        "config": args.config,
+        "runs": args.runs,
+        "out": args.out,
+        "assets_dir": args.assets_dir or None,
+    }
     try:
         return create_server(port=args.port, **kwargs)
     except OSError as exc:
@@ -267,6 +360,145 @@ def handle_model_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO)
         return 2
     _print_json({"probes": probes}, stdout)
     return 0 if all(bool(probe["available"]) for probe in probes) else 1
+
+
+def handle_supervise_start(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        config = load_supervisor_config(args.config)
+        store = SupervisorStore(args.lab)
+        state = store.start(config, args.id or None)
+        _ensure_showcase_files(store, state)
+    except (SupervisorConfigError, FileNotFoundError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json(state, stdout)
+    return 0
+
+
+def handle_supervise_run(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        config = load_supervisor_config(args.config)
+        store = SupervisorStore(args.lab)
+        state, resumed = store.start_or_resume(config)
+        _ensure_showcase_files(store, state)
+    except (SupervisorConfigError, FileNotFoundError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json({
+        "supervision_id": state["supervision_id"],
+        "status": state["status"],
+        "resumed": resumed,
+        "next_action": "由 Codex 主 Agent 按 .agents/supervisor/AGENT.md 自主选题、调度 subagent 并执行监督循环",
+    }, stdout)
+    return 0
+
+
+def _ensure_showcase_files(store: SupervisorStore, state: dict[str, Any]) -> None:
+    """Create empty offline showcase files as soon as a supervision run exists."""
+
+    run_root = store.run_path(str(state["supervision_id"]))
+    index = load_capture_index(run_root, str(state["supervision_id"]))
+    if not capture_index_path(run_root).exists():
+        write_json(capture_index_path(run_root), index.to_dict())
+    render_offline_showcase(run_root, index)
+
+
+def handle_supervise_status(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        state = SupervisorStore(args.lab).load(args.supervision_id)
+    except (SupervisorConfigError, FileNotFoundError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 1
+    _print_json(state, stdout)
+    return 0
+
+
+def handle_supervise_theme(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        item = SupervisorStore(args.lab).add_theme(
+            args.supervision_id,
+            topic=args.topic,
+            reason_selected=args.reason,
+            utility_score=args.utility_score,
+            popularity_signals=args.signal,
+            ted_relevance_score=args.ted_relevance_score,
+            narrative_beats=args.narrative_beats,
+            showcase_reason=args.showcase_reason,
+            expected_artifacts=args.expected_artifacts,
+        )
+    except (SupervisorConfigError, FileNotFoundError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json(item, stdout)
+    return 0
+
+
+def handle_supervise_capture(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        store = SupervisorStore(args.lab)
+        state = store.load(args.supervision_id)
+        capture_config = state.get("config", {}).get("capture", {})
+        if not capture_config.get("enabled", True):
+            raise SupervisorConfigError("截图采集已在监工配置中禁用")
+        if args.source == "playwright" and capture_config.get("require_trace", True) and not args.trace:
+            raise SupervisorConfigError("Playwright 捕获必须同时登记 Trace 路径")
+        record = register_capture(
+            store.run_path(args.supervision_id),
+            supervision_id=args.supervision_id,
+            theme_id=args.theme_id,
+            topic=args.topic,
+            stage=args.stage,
+            event=args.event,
+            source=args.source,
+            screenshot_path=args.screenshot,
+            trace_path=args.trace,
+            page_url=args.url,
+            narrative_beats=args.narrative_beats,
+            showcase_reason=args.showcase_reason,
+            narrative_score=args.narrative_score,
+            information_score=args.information_score,
+            visual_score=args.visual_score,
+            evidence_score=args.evidence_score,
+            artifact_paths=args.artifact_paths,
+            page_text=args.page_text,
+            strict_redaction=capture_config.get("strict_redaction", True),
+        )
+    except (SupervisorConfigError, FileNotFoundError, OSError, ValueError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json(record.to_dict(), stdout)
+    return 0
+
+
+def handle_supervise_showcase(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        store = SupervisorStore(args.lab)
+        state = store.load(args.supervision_id)
+        run_root = store.run_path(args.supervision_id)
+        config = state.get("config", {}).get("capture", {})
+        index_path = run_root / "capture-index.json"
+        if not index_path.exists():
+            index = CaptureIndex(supervision_id=args.supervision_id)
+        else:
+            index = CaptureIndex.from_dict(read_json(index_path))
+        themes = {str(item.get("theme_id", "")): item for item in state.get("theme_queue", []) if isinstance(item, dict)}
+        for theme_id, theme in themes.items():
+            score = int(theme.get("ted_relevance_score", 0) or 0)
+            if theme.get("acceptance_level") == "ted_critical":
+                score = max(score, int(config.get("ted_relevance_threshold", 70)))
+            index = select_showcase_frames(
+                run_root,
+                ted_relevance_score=score,
+                threshold=int(config.get("ted_relevance_threshold", 70)),
+                max_frames=int(config.get("max_showcase_frames", 5)),
+                theme_id=theme_id,
+            )
+        md_path, html_path = render_offline_showcase(run_root, index)
+    except (SupervisorConfigError, FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=stderr)
+        return 2
+    _print_json({"supervision_id": args.supervision_id, "markdown": str(md_path), "html": str(html_path)}, stdout)
+    return 0
 
 
 def handle_mvp_check(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -496,7 +728,7 @@ def handle_topic_candidates(args: argparse.Namespace, stdout: TextIO, stderr: Te
 
 def handle_topic_select(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     try:
-        task = TopicRunStore(args.runs).select_candidates(args.run_id, args.candidate_ids)
+        task = TopicRunStore(args.runs).select_candidates(args.run_id, args.candidate_ids, args.external_urls)
     except (FileNotFoundError, ValueError) as exc:
         print(str(exc), file=stderr)
         return 2
@@ -597,10 +829,25 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
         else:
             store.advance(args.run_id, "generating")
             fusion = fuse_topic_evidence(task, run_root)
-            fusion_path, knowledge_path = write_fusion_artifacts(task, run_root, fusion)
+            config = load_config(args.config)
+            course_client = NewApiClient.from_config(config.newapi)
+            distilled_course = None
+            course_audit = {"status": "fallback", "method": "deterministic", "reason": "missing_api_key"}
+            if course_client is not None:
+                task.usage.model_calls += 1
+                try:
+                    distilled_course = course_client.distill_course(task.topic, task.mode, fusion, config.newapi.distiller_model)
+                    course_audit = {"status": "distilled", "method": "newapi", "model": config.newapi.distiller_model}
+                except NewApiError as exc:
+                    course_audit = {"status": "fallback", "method": "deterministic", "reason": exc.code, "model": config.newapi.distiller_model}
+            write_json(run_root / "course_audit.json", course_audit)
+            fusion_path, course_path, knowledge_path = write_fusion_artifacts(task, run_root, fusion, distilled_course=distilled_course)
             task = store.load(args.run_id)
+            task.package.course = course_path.relative_to(run_root).as_posix() if task.package else None
             task.package.knowledge = knowledge_path.relative_to(run_root).as_posix() if task.package else None
             task.package.fusion = fusion_path.relative_to(run_root).as_posix() if task.package else None
+            task.artifacts["course"] = course_path.relative_to(run_root).as_posix()
+            task.artifacts["course_audit"] = "course_audit.json"
             task.artifacts["knowledge"] = knowledge_path.relative_to(run_root).as_posix()
             task.artifacts["fusion"] = fusion_path.relative_to(run_root).as_posix()
             store.save(task)
@@ -634,6 +881,7 @@ def handle_topic_process(args: argparse.Namespace, stdout: TextIO, stderr: TextI
             if task.package and task.package.knowledge and (run_root / task.package.knowledge).exists()
             else None
         ),
+        "course": task.artifacts.get("course"),
         "fusion": task.artifacts.get("fusion"),
         "skill": task.artifacts.get("skill"),
         "score": task.artifacts.get("score"),

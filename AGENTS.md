@@ -45,8 +45,13 @@ $env:HF_HUB_DISABLE_XET="1"
 .\scripts\dev.cmd
 npm run dev
 .\scripts\start-web.cmd
+npm start
+npm run start2
 ```
 
 `.\scripts\dev.cmd` / `npm run dev` 是本地开发优先入口，会优先使用仓库 `.venv`；`.\scripts\start-web.cmd` 保留为兼容入口。
+`npm start` 启动原前端（默认端口 `8765`）；`npm run start2` 构建并启动学校主题的第二前端（默认端口 `8766`）。npm 自定义脚本必须使用 `npm run start2`，`npm start2` 不是有效的 npm 命令。
 
 如果后续加入虚拟环境入口或开发脚本，应先更新本文件，再要求 Agent 使用统一入口。
+
+当用户要求“监工开干”“启动自主监工”或“继续监工”时，额外读取 `.agents/supervisor/AGENT.md` 和 `configs/ted-supervisor.json`，按其中的 Codex 主 Agent 编排、真实用户流程、产物审核与修复回归协议执行。

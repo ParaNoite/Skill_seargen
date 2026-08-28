@@ -12,6 +12,7 @@ from ..runs import read_json, write_json
 
 
 _NEGATIONS = ("禁止", "不能", "无需", "不要", "不可", "不应", "未", "无", "never", "not", "no ", "without", "disable")
+_POLARITY_EQUIVALENTS = (("insecure", "not secure"), ("unsafe", "not safe"))
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;])\s*|\r?\n+")
 _VIDEO_BOILERPLATE = (
     "欢迎来到", "感谢观看", "感谢收看", "感谢同学", "下期再见", "点赞", "投币", "关注", "订阅", "一键三连",
@@ -20,6 +21,11 @@ _VIDEO_BOILERPLATE = (
 _VIDEO_TECHNICAL_TERMS = (
     "godot", "state", "chart", "fsm", "github", "状态", "插件", "节点", "场景", "代码", "脚本",
     "配置", "安装", "下载", "事件", "信号", "转换", "条件", "函数", "变量", "项目", "运行",
+)
+_VIDEO_ENVIRONMENT_NOISE = (
+    "browser tab title", "taskbar", "system clock", "date shows", "local network address",
+    "browser marks the connection", "marks the page as", "marks the current page as", "not secure",
+    "insecure", "unsafe", "vite app", "port 5173",
 )
 
 
@@ -107,27 +113,37 @@ def fuse_topic_evidence(task: TopicTask, run_root: Path) -> dict[str, object]:
         "evidence_gaps": gaps,
         "risk_flags": _unique(
             (["unresolved_source_conflicts"] if conflicts else [])
-            + (["single_source_conclusions"] if any(item["low_confidence"] for item in conclusions) else [])
+            + (["single_source_conclusions"] if any(item.get("code") == "critical_low_confidence_conclusions" for item in gaps) else [])
             + (["evidence_gaps_present"] if gaps else [])
         ),
     }
     return payload
 
 
-def write_fusion_artifacts(task: TopicTask, run_root: Path, fusion: dict[str, object]) -> tuple[Path, Path]:
+def write_fusion_artifacts(
+    task: TopicTask,
+    run_root: Path,
+    fusion: dict[str, object],
+    *,
+    distilled_course: dict[str, object] | None = None,
+) -> tuple[Path, Path, Path]:
     package = task.package
     if package is None:
         raise ValueError("主题任务缺少主题包索引")
     if not package.fusion:
         package.fusion = f"{package.root}/fusion.json"
+    if not package.course:
+        package.course = f"{package.root}/COURSE.md"
     if not package.knowledge:
         package.knowledge = f"{package.root}/knowledge.md"
 
     fusion_path = run_root / package.fusion
+    course_path = run_root / package.course
     knowledge_path = run_root / package.knowledge
     write_json(fusion_path, fusion)
+    course_path.write_text(_render_distilled_course(task, distilled_course) if distilled_course else _render_course(task, fusion), encoding="utf-8")
     knowledge_path.write_text(_render_knowledge(task, fusion), encoding="utf-8")
-    return fusion_path, knowledge_path
+    return fusion_path, course_path, knowledge_path
 
 
 def _load_evidence_records(evidence_dir: Path) -> list[tuple[Path, dict[str, object]]]:
@@ -170,6 +186,8 @@ def _extract_web(record: dict[str, object], candidate_id: str, path: str, *, top
         "risk_flags": _string_list(record.get("risk_flags")),
     }
     sentences = _claim_sentences(str(record.get("text", "")), topic=topic)
+    if _is_runner_topic(topic):
+        sentences = [claim for claim in sentences if _is_runner_runtime_claim(claim)]
     return [FusionEvidence(**common, locator=f"sentence:{index}", claim=claim, confidence=quality / 100) for index, claim in enumerate(sentences, 1)]
 
 
@@ -209,11 +227,13 @@ def _extract_video(record: dict[str, object], candidate_id: str, path: str) -> l
             or not str(raw.get("claim", "")).strip()
         ):
             continue
+        claim = _clean_claim(str(raw["claim"]))
+        if _is_video_environment_noise(claim):
+            continue
         confidence = _bounded_float(raw.get("confidence"), 0.5)
         result.append(
             FusionEvidence(
-                **common,
-                locator=str(raw.get("timestamp") or f"item:{index}"), claim=_clean_claim(str(raw["claim"])),
+                **common, locator=str(raw.get("timestamp") or f"item:{index}"), claim=claim,
                 confidence=confidence, quality_score=round(confidence * 100),
             )
         )
@@ -287,6 +307,12 @@ def _is_video_boilerplate(claim: str) -> bool:
     )
 
 
+def _is_video_environment_noise(claim: str) -> bool:
+    """Drop recorded browser chrome, not evidence of the demonstrated product."""
+    lowered = claim.lower()
+    return any(marker in lowered for marker in _VIDEO_ENVIRONMENT_NOISE)
+
+
 def _trim_video_boilerplate(claim: str) -> str:
     lowered = claim.lower()
     cut_positions = [lowered.find(marker) for marker in _VIDEO_BOILERPLATE if lowered.find(marker) > 0]
@@ -306,12 +332,15 @@ def _extract_github(record: dict[str, object], candidate_id: str, path: str) -> 
         for index, raw in enumerate(raw_items if isinstance(raw_items, list) else [], 1):
             if not isinstance(raw, dict) or not str(raw.get("excerpt", "")).strip():
                 continue
+            claim = _clean_claim(str(raw["excerpt"]))
+            if _is_runner_topic(str(record.get("topic", ""))) and not _is_runner_runtime_claim(claim):
+                continue
             result.append(
                 FusionEvidence(
                     source_id=str(record.get("source_id") or f"github:{candidate_id}"), candidate_id=candidate_id,
                     source_type="github", title=str(record.get("repo", "")), url=str(record.get("url", "")),
                     evidence_path=path, locator=f"{category}:{raw.get('path', index)}",
-                    claim=_clean_claim(str(raw["excerpt"])), confidence=_bounded_float(record.get("confidence"), quality / 100),
+                    claim=claim, confidence=_bounded_float(record.get("confidence"), quality / 100),
                     quality_score=quality, risk_flags=_string_list(record.get("risk_flags")),
                 )
             )
@@ -330,6 +359,22 @@ def _extract_github(record: dict[str, object], candidate_id: str, path: str) -> 
                 )
             )
     return result
+
+
+def _is_runner_topic(topic: str) -> bool:
+    lower = topic.lower()
+    return "three" in lower and ("runner" in lower or "跑酷" in topic or "game" in lower)
+
+
+def _is_runner_runtime_claim(claim: str) -> bool:
+    lower = claim.lower()
+    markers = (
+        "touch", "pointer", "ontouch", "maxtouchpoints", "keydown", "keyup", "keyboard",
+        "resize", "viewport", "responsive", "collision", "aabb", "box3", "intersect",
+        "obstacle", "gameover", "game over", "death", "restart", "reboot", "reload", "reset",
+        "requestanimationframe", "animate", "gameloop", "game loop", "three.js",
+    )
+    return any(marker in lower for marker in markers)
 
 
 def _claim_sentences(text: str, limit: int = 12, *, topic: str = "") -> list[str]:
@@ -381,6 +426,11 @@ def _sentence_priority(claim: str, topic: str) -> int:
 def _find_matching_group(groups: list[list[FusionEvidence]], item: FusionEvidence, *, opposite_polarity: bool) -> list[FusionEvidence] | None:
     for group in groups:
         representative = group[0]
+        # A source may explain one runtime capability across several adjacent
+        # sentences. Those sentences are not independent sources and cannot
+        # form a cross-source conflict with each other.
+        if opposite_polarity and representative.candidate_id == item.candidate_id:
+            continue
         if _is_negative(representative.claim) == _is_negative(item.claim):
             if opposite_polarity:
                 continue
@@ -392,6 +442,10 @@ def _find_matching_group(groups: list[list[FusionEvidence]], item: FusionEvidenc
 
 
 def _claim_similarity(left: str, right: str) -> float:
+    left_family = _runtime_claim_family(left)
+    right_family = _runtime_claim_family(right)
+    if left_family and left_family == right_family:
+        return 0.9
     left_key = _claim_key(left)
     right_key = _claim_key(right)
     shorter, longer = sorted((left_key, right_key), key=len)
@@ -400,8 +454,24 @@ def _claim_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left_key, right_key).ratio()
 
 
+def _runtime_claim_family(value: str) -> str:
+    lower = value.lower()
+    families = (
+        ("mobile_input", ("touch", "pointer", "ontouch", "maxtouchpoints", "keydown", "keyup", "keyboard")),
+        ("resize", ("resize", "viewport", "responsive")),
+        ("collision", ("collision", "aabb", "box3", "intersect", "obstacle")),
+        ("game_over", ("gameover", "game over", "death-screen", "death", "showgameover")),
+        ("restart", ("restart", "reboot", "reload", "reset")),
+        ("game_loop", ("requestanimationframe", "gameloop", "game loop", "animate")),
+    )
+    for family, markers in families:
+        if any(marker in lower for marker in markers):
+            return family
+    return ""
+
+
 def _claim_key(value: str) -> str:
-    value = value.lower().replace("必须", "must")
+    value = _normalize_polarity(value).replace("必须", "must")
     for marker in _NEGATIONS:
         value = value.replace(marker, "")
     value = re.sub(r"不(?!须)", "", value)
@@ -409,8 +479,24 @@ def _claim_key(value: str) -> str:
 
 
 def _is_negative(value: str) -> bool:
-    lowered = value.lower().replace("必须", "must")
-    return any(marker in lowered for marker in _NEGATIONS) or re.search(r"不(?!须)", lowered) is not None
+    lowered = _normalize_polarity(value).replace("必须", "must")
+    # "whether ... or not" / "... or not" expresses a condition, not a
+    # negative implementation claim.
+    lowered = lowered.replace("or not", "")
+    for marker in _NEGATIONS:
+        if re.fullmatch(r"[a-z ]+", marker):
+            if re.search(rf"\b{re.escape(marker.strip())}\b", lowered):
+                return True
+        elif marker in lowered:
+            return True
+    return re.search(r"不(?!须)", lowered) is not None
+
+
+def _normalize_polarity(value: str) -> str:
+    normalized = value.lower()
+    for source, target in _POLARITY_EQUIVALENTS:
+        normalized = normalized.replace(source, target)
+    return normalized
 
 
 def _build_conclusion(index: int, group: list[FusionEvidence]) -> dict[str, object]:
@@ -463,7 +549,21 @@ def _evidence_gaps(task: TopicTask, sources: list[dict[str, object]], conclusion
             gaps.append({"code": "selected_source_without_evidence", "candidate_id": candidate.candidate_id, "detail": f"已选 {candidate.source_type} 来源未生成可融合证据。"})
     if len({str(item["source_type"]) for item in sources}) < 2:
         gaps.append({"code": "single_source_type", "candidate_id": "", "detail": "当前结论只覆盖一种来源类型，缺少跨类型佐证。"})
-    if any(bool(item["low_confidence"]) for item in conclusions):
+    if _is_runner_topic(task.topic):
+        critical_families = {"mobile_input", "collision", "game_over", "restart", "resize", "game_loop"}
+        supported_families = {
+            _runtime_claim_family(str(item.get("claim", "")))
+            for item in conclusions
+            if not bool(item.get("low_confidence"))
+        }
+        missing = sorted(family for family in critical_families if family not in supported_families)
+        if missing:
+            gaps.append({
+                "code": "critical_low_confidence_conclusions",
+                "candidate_id": "",
+                "detail": f"跑酷关键能力缺少交叉证据：{', '.join(missing)}。",
+            })
+    elif any(bool(item["low_confidence"]) for item in conclusions):
         gaps.append({"code": "low_confidence_conclusions", "candidate_id": "", "detail": "存在仅由单一来源或弱证据支持的结论。"})
     if conflicts:
         gaps.append({"code": "unresolved_conflicts", "candidate_id": "", "detail": "存在尚未解决的来源冲突。"})
@@ -494,6 +594,96 @@ def _render_knowledge(task: TopicTask, fusion: dict[str, object]) -> str:
         risks = f"；风险：{', '.join(source['risk_flags'])}" if source["risk_flags"] else ""
         lines.append(f"- [{source['source_id']}] {source['title'] or source['url']}：{source['trust_level']}，质量 {source['quality_score']}/100{risks}")
     lines.extend(["", "## 引用说明", "", "引用格式为 `[来源ID:定位信息]`；完整文本、时间戳或文件片段保存在 `topic_package/evidence/`。"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_course(task: TopicTask, fusion: dict[str, object]) -> str:
+    conclusions = [item for item in fusion.get("conclusions", []) if isinstance(item, dict)]
+    supported = [item for item in conclusions if item.get("status") == "supported" and not item.get("low_confidence")]
+    review = [item for item in conclusions if item not in supported]
+    ordered = supported + review
+    sources = [item for item in fusion.get("source_summary", []) if isinstance(item, dict)]
+    gaps = [item for item in fusion.get("evidence_gaps", []) if isinstance(item, dict)]
+
+    lines = [
+        f"# {task.topic}：证据提纲",
+        "",
+        "> 教学模型未能生成课程，以下为基于证据的降级提纲。",
+        "",
+        "## 学完你能获得什么",
+        "",
+        f"- 建立对“{task.topic}”的整体认识，并能复述关键概念。",
+        "- 按照课程中的步骤或方法完成一次最小实践。",
+        "- 识别资料中仍需复核的说法，避免把单一来源当成确定事实。",
+        "",
+        "## 先建立知识地图",
+        "",
+    ]
+    if ordered:
+        for index, item in enumerate(ordered[:8], start=1):
+            marker = "（需复核）" if item.get("low_confidence") or item.get("status") != "supported" else ""
+            lines.append(f"{index}. {str(item.get('claim', '')).strip()}{marker}")
+    else:
+        lines.append("当前证据不足，暂时无法形成可靠的知识地图。")
+
+    lines.extend(["", "## 跟着内容学习", ""])
+    for index, item in enumerate(ordered[:10], start=1):
+        citations = " ".join(
+            f"[{ref.get('source_id', '')}:{ref.get('locator', '')}]"
+            for ref in item.get("citations", [])[:2]
+            if isinstance(ref, dict)
+        )
+        heading = "可靠要点" if item in supported else "待验证要点"
+        lines.extend([f"### {index}. {heading}", "", str(item.get("claim", "")).strip(), "", f"来源：{citations}" if citations else "来源：当前没有可定位引用。", ""])
+    if not ordered:
+        lines.extend(["没有足够内容可供学习。请补充更相关、更多样的来源后重新生成。", ""])
+
+    lines.extend(["## 常见误区与边界", ""])
+    if gaps:
+        lines.extend(f"- {str(item.get('detail', '')).strip()}" for item in gaps[:6])
+    else:
+        lines.append("- 当前没有结构化证据缺口，但仍应结合实际版本和使用场景验证。")
+
+    lines.extend(["", "## 自测", ""])
+    prompts = [str(item.get("claim", "")).strip() for item in ordered[:3] if str(item.get("claim", "")).strip()]
+    if prompts:
+        for index, claim in enumerate(prompts, start=1):
+            lines.append(f"{index}. 不看原文，用自己的话解释：{claim}")
+        lines.append(f"{len(prompts) + 1}. 选择一个要点做一次最小实践，并记录结果和失败原因。")
+    else:
+        lines.append("1. 当前证据不足：你还需要补充哪些来源，才能开始可靠学习？")
+
+    lines.extend(["", "## 继续学习", ""])
+    for source in sources[:8]:
+        risks = "，需注意：" + "、".join(str(flag) for flag in source.get("risk_flags", [])) if source.get("risk_flags") else ""
+        lines.append(f"- {source.get('title') or source.get('url')}（{source.get('source_type')}，质量 {source.get('quality_score')}/100{risks}）")
+    lines.extend(["", "---", "", "本课程用于人类学习；详细引用、冲突和证据审计请查看 `knowledge.md`。技术模式下，机器可执行版本位于 `SKILL.md`。"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_distilled_course(task: TopicTask, course: dict[str, object]) -> str:
+    title = str(course.get("title") or task.topic).strip()
+    lines = [f"# {title}", "", "## 学完你能获得什么", ""]
+    outcomes = [str(item).strip() for item in course.get("learning_outcomes", []) if str(item).strip()]
+    lines.extend(f"- {item}" for item in outcomes)
+    overview = str(course.get("overview", "")).strip()
+    lines.extend(["", "## 课程导览", "", overview or "从证据支持的核心内容开始学习。", "", "## 跟着内容学习", ""])
+    for index, lesson in enumerate(course.get("lessons", []), start=1):
+        if not isinstance(lesson, dict):
+            continue
+        refs = " ".join(f"[{ref}]" for ref in lesson.get("evidence_refs", []))
+        heading = re.sub(r"^\s*\d+[.、]\s*", "", str(lesson.get("heading", ""))).strip()
+        lines.extend([f"### {index}. {heading}", "", str(lesson.get("content", "")).strip(), "", f"证据：{refs}", ""])
+    lines.extend(["## 常见误区与边界", ""])
+    pitfalls = [str(item).strip() for item in course.get("pitfalls", []) if str(item).strip()]
+    lines.extend(f"- {item}" for item in pitfalls) if pitfalls else lines.append("- 结合目标版本和实际环境验证课程中的做法。")
+    lines.extend(["", "## 自测与实践", ""])
+    exercises = [str(item).strip() for item in course.get("exercises", []) if str(item).strip()]
+    lines.extend(f"{index}. {item}" for index, item in enumerate(exercises, start=1)) if exercises else lines.append("1. 用自己的话复述核心内容，并完成一次最小实践。")
+    lines.extend(["", "## 继续学习", ""])
+    next_steps = [str(item).strip() for item in course.get("next_steps", []) if str(item).strip()]
+    lines.extend(f"- {item}" for item in next_steps) if next_steps else lines.append("- 根据 `knowledge.md` 中的证据缺口补充来源。")
+    lines.extend(["", "---", "", "本课程由 Generate 基于可定位证据蒸馏；详细引用、冲突和风险请查看 `knowledge.md`。技术模式下，机器可执行版本位于 `SKILL.md`。"])
     return "\n".join(lines).rstrip() + "\n"
 
 

@@ -1,39 +1,149 @@
 # skill_seargen
 
-`skill_seargen`（search and generate）是一个本地 Search × Generate 原型：广泛搜索公开视频、公开网页与代码中的真实经验，再从多模态证据中生成可复核、可追溯的 Codex skill 候选包。
+`skill_seargen`（search and generate）是一个本地 Search × Generate 原型：广泛搜索公开视频、公开网页与代码中的真实经验，再把多模态证据同时蒸馏为人类可学习的课程和 AI 可执行的 Skill。
 
-当前本地 Web 版本包含首页、Skill 目录和工作台。目录用于展示人工挑选的结果，工作台用于展示来源搜索、证据处理、生成、评分与复核过程。
+当前本地 Web 版本包含首页、Skill 目录和工作台。目录用于展示人工挑选的结果；工作台用于搜索来源、处理证据，并在结果页优先阅读 `COURSE.md`，技术模式下继续查看 `SKILL.md`、评分与审计。
 
 当前目录是源码仓库内的本地演示数据，运行时读取仓库根目录的 `catalog/`；暂不承诺从 wheel 安装后携带这批目录内容。
 
 ## 项目文档
 
+当前使用：
+
 - [PROJECT.md](PROJECT.md)：架构、目录职责、模块边界和第三方管理。
 - [AGENTS.md](AGENTS.md)：Agent 执行约束。
 - [THIRD_PARTY.md](THIRD_PARTY.md)：第三方依赖来源、版本和 license 总账。
+- [docs/evidence-contract.md](docs/evidence-contract.md)：证据链 manifest 契约。
+- [docs/v1.1-closure.md](docs/v1.1-closure.md)：v1.1 研究自动化、API 与前端工作台验收说明。
+- [docs/frontend-user-guide.md](docs/frontend-user-guide.md)：面向第一次使用产品的客人，说明首页、Skill 目录和前端工作台的完整操作流程。
+- [docs/testing.md](docs/testing.md)：测试规范。
 - [docs/project-structure.md](docs/project-structure.md)：项目结构规范。
 - [docs/third-party-policy.md](docs/third-party-policy.md)：第三方管理细则。
-- [docs/evidence-contract.md](docs/evidence-contract.md)：证据链 manifest 契约。
-- [docs/v0.5-closure.md](docs/v0.5-closure.md)：v0.5 网页知识总结结项与验收说明。
-- [docs/v0.6-closure.md](docs/v0.6-closure.md)：v0.6 多视频主题处理结项与验收说明。
-- [docs/v0.7-closure.md](docs/v0.7-closure.md)：v0.7 技术模式与 GitHub 来源结项与验收说明。
-- [docs/v0.8-closure.md](docs/v0.8-closure.md)：v0.8 多来源证据融合结项与验收说明。
-- [docs/v0.9-closure.md](docs/v0.9-closure.md)：v0.9 技术 skill 生成、评分、复核与重跑验收说明。
-- [docs/v1.1-closure.md](docs/v1.1-closure.md)：v1.1 研究自动化、API 与前端工作台验收说明。
-- [docs/testing.md](docs/testing.md)：测试规范。
 
-## 安装
+历史记录：`docs/v0.*`、`docs/v1.0-*`、`docs/v1.0-tickets.md` 和 `video-skill-gather-v0.1-plan.md` 保留对应版本的范围、决策与验收结果。
 
-建议在虚拟环境中安装本项目：
+历史文档可能使用当时的旧产物名称。当前产品行为以本 README、`PROJECT.md`、`docs/evidence-contract.md` 和前端用户指南为准。
+
+## 当前产物
+
+Generate 不是只做可信度汇总。所有成功主题都会先生成给人阅读的课程；技术模式再生成给 AI 使用的执行能力。
+
+| 产物 | 面向对象 | 用途 |
+|---|---|---|
+| `COURSE.md` | 学习者 | 课程目标、导览、教学单元、误区、自测和实践；结果页默认优先展示 |
+| `knowledge.md` | 审核者 | 结论级引用、冲突、证据缺口、来源质量与风险 |
+| `SKILL.md` | AI | 技术模式的触发条件、执行步骤、完成标准和边界 |
+| `score.json` | Judge / 审核者 | 技术课程与 Skill 的结构、证据、可执行性和边界评分 |
+| `course_audit.json` | 审核者 | 教学蒸馏使用的模型或降级原因，不保存原始模型正文 |
+
+配置了可用文本模型时，Generate 会把有引用的融合证据重写成结构化中文课程。模型不可用、超时或响应不合规时，任务仍可生成明确标注的“证据提纲”降级版，不会把转录拼接冒充完整课程。
+
+## 从零部署与验收
+
+### 前置条件
+
+- Windows PowerShell、Python 3.11 或更高版本、Node.js 20 或更高版本。
+- 视频处理需要本地 `ffmpeg` 与 `yt-dlp`；首次启用 ASR 时需要联网下载 faster-whisper 模型。
+- 真实主题搜索需要可访问的 SearXNG 实例；真实视觉、课程蒸馏与 Judge 需要设置 `NEWAPI_API_KEY`。未配置外部服务时，仍可运行单元测试、CLI 帮助、MVP 自检和离线验收。
+
+### 安装步骤
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e .
+# 1. 创建并激活 Python 环境
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 2. 安装 Python 与前端依赖
+python -m pip install --upgrade pip
+python -m pip install -e .
+npm install
+
+# 3. 创建本地配置文件；config.json 已被 Git 忽略
+Copy-Item configs\skill-gather.example.json config.json
+
+# 4. 可选：为真实模型阶段设置当前 PowerShell 会话的密钥
+$env:NEWAPI_API_KEY="your-key"
 ```
 
-如果你已经激活了虚拟环境，也可以直接运行：
+配置样例使用保留域名 `https://api.example.test/v1`，不能直接请求。将 `providers.newapi.base_url` 改为你自己的 OpenAI-compatible NewAPI 服务地址，并只在当前 PowerShell 会话中设置密钥：
 
-```bash
-python -m pip install -e .
+```powershell
+$env:NEWAPI_API_KEY="your-key"
+```
+
+`config.json` 已被 Git 忽略；不要将 API key、cookie、token、个人机器路径或真实服务地址写入配置样例或提交到 Git。
+
+### Docker 与 SearXNG（真实搜索必需）
+
+SearXNG 仅用于真实主题搜索；离线测试和 `--fake` 搜索不需要 Docker。先安装并启动 Docker Desktop，再确认 Docker daemon 已就绪：
+
+```powershell
+docker version
+```
+
+以下命令在仓库下创建一个本地 SearXNG 配置并仅绑定到回环地址。`settings.yml` 位于 `.local/`，不会进入 Git。镜像先使用官方当前标签；用于长期部署前，请通过 `docker image inspect` 记录并固定其 digest。
+
+```powershell
+$searxDir = Join-Path $PWD ".local\searxng"
+New-Item -ItemType Directory -Force $searxDir | Out-Null
+$searxSecret = [guid]::NewGuid().ToString("N")
+@"
+use_default_settings: true
+server:
+  secret_key: $searxSecret
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+formats:
+  - html
+  - json
+"@ | Set-Content -Encoding ascii (Join-Path $searxDir "settings.yml")
+
+docker run -d --name skill-seargen-searxng --restart unless-stopped --publish 127.0.0.1:8080:8080 --volume "${searxDir}:/etc/searxng:rw" searxng/searxng:latest
+docker image inspect searxng/searxng:latest --format '{{index .RepoDigests 0}}'
+```
+
+验证 JSON 接口后，将地址写入本地 `config.json` 的 `search.searxng_base_url`：
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8080/search?q=skill_seargen&format=json" | Select-Object -ExpandProperty results -First 1
+# 在 config.json 中设置："searxng_base_url": "http://127.0.0.1:8080"
+.\.venv\Scripts\python.exe -m skill_gather model-check --config config.json
+```
+
+`model-check` 会调用配置的 NewAPI 服务，因而可能产生外部请求或费用；只验证 SearXNG 时运行前一条 `Invoke-RestMethod` 即可。停止并删除本地搜索服务：
+
+```powershell
+docker rm --force skill-seargen-searxng
+```
+
+首次安装 ASR 模型时运行：
+
+```powershell
+npm run setup:local
+```
+
+该脚本使用仓库 `.hf-cache` 保存模型缓存。具备 NVIDIA CUDA 环境时可设置 `SKILL_GATHER_FASTER_WHISPER_DEVICE=cuda` 与 `SKILL_GATHER_FASTER_WHISPER_COMPUTE_TYPE=float16`；其他环境使用 CPU/int8：
+
+```powershell
+$env:SKILL_GATHER_FASTER_WHISPER_DEVICE="cpu"
+$env:SKILL_GATHER_FASTER_WHISPER_COMPUTE_TYPE="int8"
+```
+
+### 启动与本地验收
+
+```powershell
+# 原前端，默认 http://127.0.0.1:8765
+npm run dev
+
+# 学校主题第二前端，默认 http://127.0.0.1:8766
+npm run start2
+
+# 自动化与命令入口检查
+npm test
+npm run cli
+.\.venv\Scripts\python.exe -m skill_gather mvp-check --config configs\skill-gather.example.json
+.\.venv\Scripts\python.exe -m skill_gather acceptance --dataset benchmarks\v1.0-topics.json --config configs\skill-gather.example.json --runs .\runs\v1.0-offline-acceptance
 ```
 
 ## 配置
@@ -57,6 +167,21 @@ $env:NEWAPI_API_KEY="your-key"
 ### 主题任务默认值
 
 `topic_defaults` 用于约束后续主题研究的候选数量、来源数量、视频时长、模型调用、费用和运行时间。`reuse_cache` 默认启用；`refresh_cache` 记录显式刷新意图，供后续的搜索和来源处理阶段使用。示例配置已包含默认值。
+
+### NewAPI 模型与阶段参数
+
+`providers.newapi` 中的 `vision_model`、`distiller_model` 和 `judge_model` 可配置为 NewAPI 后台可调用的模型名，例如 `gpt-5.6-sol`。ASR 仍是本地主链路，`asr_model` 必须保持 `faster-whisper:<模型名或本地路径>`。
+
+`timeout_sec` 控制 NewAPI 聊天请求超时；`request_profiles` 可按阶段覆盖请求参数：
+
+- `probe`：`model-check` 的最小可用性探测。
+- `vision`：视频帧视觉/OCR。
+- `search`：语义计划、查询扩展和候选复核。
+- `course`：面向人的 `COURSE.md` 蒸馏。
+- `skill`：单视频 RIA++ Skill 蒸馏。
+- `judge`：评分与风险判断。
+
+支持的字段包括 `temperature`、`top_p`、`max_tokens`、`max_completion_tokens` 和 `reasoning_effort`。如果服务端对某个模型不接受某个字段，请先删掉对应 profile 字段后再运行 `model-check`。
 
 ## ASR 模型
 
@@ -91,29 +216,9 @@ $env:HF_HOME="$PWD\.hf-cache"
 
 ## CLI 使用
 
-```bash
-skill-gather video <bilibili-url> --config config.json --out ./skills --runs ./runs
-skill-gather score <skill-dir>
-skill-gather inspect <run-id> --runs ./runs
-skill-gather review <run-id> --runs ./runs --label needs_changes --notes "边界需要补充"
-skill-gather calibrate benchmarks/v0.2-labels.example.json
-skill-gather benchmark-report benchmarks/v0.2-videos.json --runs ./runs
-skill-gather vision-report runs/<full-run> runs/<sampled-run> --expected-fields benchmarks/v0.2-expected-fields.example.json
-skill-gather mvp-check --config configs/skill-gather.example.json
-skill-gather acceptance --dataset benchmarks/v1.0-topics.json --config configs/skill-gather.example.json --runs ./runs/v1.0-offline-acceptance
-skill-gather model-check --config config.json
-skill-gather topic create "Godot 导航" --mode technical --runs ./runs
-skill-gather topic search <topic-run-id> --config config.json --runs ./runs --fake
-skill-gather topic candidates <topic-run-id> --runs ./runs
-skill-gather topic select <topic-run-id> <candidate-id> --runs ./runs
-skill-gather topic process <topic-run-id> --runs ./runs --config config.json --vision-mode sampled --vision-frame-limit 12
-skill-gather topic inspect <topic-run-id> --runs ./runs
-skill-gather topic resume <topic-run-id> --runs ./runs
-skill-gather topic rerun <topic-run-id> --runs ./runs --stage generating
-skill-gather topic review <topic-run-id> --runs ./runs --label needs_changes --notes "补充边界说明"
-```
+### OpenCode Agent 组装
 
-Web API 创建主题时可传 `execution_mode: "manual" | "auto"`。模糊主题会持久化结构化 `plan`；手动模式通过 `/api/topics/<run-id>/plan/confirm` 确认后搜索，自动模式可通过 `/api/topics/<run-id>/auto` 推进搜索、选源和处理。统一运营入口为 `/api/work-items`、`/api/metrics` 和 `/api/results`。
+学校主题前端提供独立“组装”页：从可下载 Skill 货架勾选能力后生成 `skill-seargen-agent.zip`。解压并用 OpenCode 打开其中的 `skill-seargen-agent` 目录即可使用。
 
 也可以通过模块方式调用：
 
@@ -136,7 +241,7 @@ Web API 创建主题时可传 `execution_mode: "manual" | "auto"`。模糊主题
 - `topic search`：按模式调用搜索 provider，写入候选、查询审计和 `sources.json`；`--fake` 用于离线验证。
 - `topic candidates`：查看候选 ID、来源类型、质量分、风险和查询来源。
 - `topic select`：显式确认候选来源；v0.4 原子写入 `TopicTask.selected_sources` 与 `topic_package/sources.json`，状态进入 `processing_sources`，但不触发下载、抓取、ASR、视觉分析或生成。
-- `topic process`：处理已确认的网页、公开视频和技术模式 GitHub 来源，再统一生成 `topic_package/fusion.json` 与带结论级引用的中文 `knowledge.md`；技术模式额外生成 `SKILL.md` 和分维度 `score.json`。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制；普通模式不会强行处理 GitHub。
+- `topic process`：处理已确认的网页、公开视频和技术模式 GitHub 来源，统一生成面向人的 `COURSE.md`、面向审核的 `knowledge.md`、`fusion.json` 和 `course_audit.json`；技术模式额外生成 `SKILL.md` 和分维度 `score.json`。视频处理可通过 `--config`、`--vision-mode` 和 `--vision-frame-limit` 控制；普通模式不会强行处理 GitHub。
 - `topic inspect`：以 JSON 查看主题 run 的阶段、失败信息和将来产物路径。
 - `topic resume`：将失败的主题 run 恢复到失败前的阶段，并保留失败审计信息。
 - `topic rerun`：从 `processing_sources`、`generating` 或 `scoring` 阶段重跑，并将请求写入 `rerun_audit.json`。
@@ -170,9 +275,11 @@ SearXNG 是独立的 AGPL-3.0 本地服务。本项目只调用其 JSON HTTP 接
 
 本地 Web 界面包含三个入口：
 
-- 首页：以 `Search × Generate` 展示“发现来源”和“蒸馏证据”两条同等重要的能力轨道。
-- 浏览 Skills：读取 `catalog/catalog.json`，展示 12 个带来源、版本、许可证和下载状态的条目。
+- 首页：以 `Search × Generate` 展示“发现来源”和“蒸馏课程与能力”两条同等重要的能力轨道。
+- 浏览 Skills：读取 `catalog/catalog.json`，展示 17 个带来源、版本、许可证和下载状态的条目。
 - 工作台：保留主题创建、搜索、选源、视频提交、运行进度、证据、评分和 MVP 自检能力。
+
+工作台“结果”页会先显示“人类课程”；技术主题在同一结果中继续显示“AI Skill”。可信度、冲突和风险保留在审计产物中，不占据主要学习正文。
 
 目录中的外部 Skill 默认只建立来源索引。只有本项目原创或许可证明确允许再分发、且包位于 `catalog/packages/` 下的条目才会提供 ZIP 下载。
 
@@ -220,6 +327,24 @@ http://127.0.0.1:8765
 ```
 
 Web 表单中的 API key 只会写入当前 Web 进程的环境变量，不会写回配置文件，也不会在响应里回显。
+
+本机稳定模式：首次安装或 ASR 模型变更后运行 npm run setup:local；日常使用 npm start。
+npm start 固定优先使用仓库 .venv，在启动前检查配置和本地 ASR 依赖，并使用仓库
+.hf-cache、CUDA 和 float16。完整功能检查仍会真实访问外部服务，因此外部服务临时故障
+无法由本地配置消除。
+
+### 学校主题第二前端
+
+原前端与学校主题前端相互独立：
+
+```powershell
+npm start
+npm run start2
+```
+
+`npm start` 继续启动原前端，默认地址为 `http://127.0.0.1:8765`。`npm run start2` 会先构建 `frontend-school/`，再用独立静态资源目录启动学校主题前端，默认地址为 `http://127.0.0.1:8766`。两套前端使用同一组后端 API 和本地 run 数据。
+
+注意：npm 的自定义脚本需要 `run` 关键字，直接执行 `npm start2` 会得到 `Unknown command: "start2"`。
 
 ## v1.0 离线验收
 

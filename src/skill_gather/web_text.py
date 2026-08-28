@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
+import ipaddress
 import re
+import socket
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 MAX_RESPONSE_BYTES = 2_000_000
@@ -15,6 +17,50 @@ MAX_SNAPSHOT_CHARS = 12_000
 
 class WebTextError(RuntimeError):
     """A public webpage could not be fetched or converted into usable text."""
+
+
+def _assert_public_network_url(url: str, *, redirect: bool = False) -> None:
+    """Reject local/private targets before a selected web source is fetched."""
+    error_prefix = "网页重定向" if redirect else "网页来源"
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise WebTextError(f"{error_prefix} URL 格式无效") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise WebTextError(f"{error_prefix}必须是公开的 http 或 https URL")
+    if parsed.username or parsed.password:
+        raise WebTextError(f"{error_prefix} URL 不能包含用户名或密码")
+    if not hostname:
+        raise WebTextError(f"{error_prefix}缺少主机名")
+    if hostname.casefold() == "localhost" or hostname.casefold().endswith(".localhost"):
+        raise WebTextError(f"{error_prefix}不能指向本机或私有网络")
+
+    addresses: set[str] = set()
+    try:
+        addresses.add(str(ipaddress.ip_address(hostname)))
+    except ValueError:
+        try:
+            resolved = socket.getaddrinfo(hostname, port or 443, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise WebTextError(f"{error_prefix}主机名无法解析") from exc
+        addresses = {entry[4][0] for entry in resolved if entry[4]}
+        if not addresses:
+            raise WebTextError(f"{error_prefix}主机名无法解析")
+
+    for address in addresses:
+        try:
+            if not ipaddress.ip_address(address).is_global:
+                raise WebTextError(f"{error_prefix}不能指向本机或私有网络")
+        except ValueError as exc:
+            raise WebTextError(f"{error_prefix}主机名解析结果无效") from exc
+
+
+class _PublicRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        _assert_public_network_url(newurl, redirect=True)
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,11 +149,7 @@ class _TextExtractor(HTMLParser):
 
 def fetch_public_page(url: str, *, timeout_sec: int = 15) -> WebPage:
     """Fetch a public HTML page without credentials, cookies, or browser state."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise WebTextError("网页来源必须是公开的 http 或 https URL")
-    if parsed.username or parsed.password:
-        raise WebTextError("网页来源 URL 不能包含用户名或密码")
+    _assert_public_network_url(url)
     if timeout_sec <= 0:
         raise WebTextError("网页抓取超时必须是正整数")
 
@@ -119,7 +161,8 @@ def fetch_public_page(url: str, *, timeout_sec: int = 15) -> WebPage:
         },
     )
     try:
-        with urlopen(request, timeout=timeout_sec) as response:  # nosec B310: selected sources are explicitly confirmed by the user
+        opener = build_opener(_PublicRedirectHandler())
+        with opener.open(request, timeout=timeout_sec) as response:  # nosec B310: selected sources are explicitly confirmed by the user
             content_type = response.headers.get_content_type()
             if content_type not in {"text/html", "application/xhtml+xml"}:
                 raise WebTextError(f"网页响应不是 HTML：{content_type}")
@@ -135,8 +178,7 @@ def fetch_public_page(url: str, *, timeout_sec: int = 15) -> WebPage:
     except OSError as exc:
         raise WebTextError(f"网页请求失败：{exc}") from exc
 
-    if urlparse(final_url).scheme not in {"http", "https"}:
-        raise WebTextError("网页重定向到了不受支持的 URL 协议")
+    _assert_public_network_url(final_url, redirect=True)
     try:
         html = raw.decode(charset, errors="replace")
     except LookupError:

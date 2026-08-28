@@ -17,13 +17,46 @@ venv/
 .playwright-cli/
 .workbuddy/
 output/
+.npm-cache/
+.run-archive/
+.local/
 
 # Local secrets and runtime artifacts
 .env
 config.json
 *.bak-*
+debug.log
+*.bak.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]
 runs/
 skills/
+.agent-lab/
+.agents/supervisor/MEMORY.md
+projects/
+
+# Local TED presentation and supervision material; not part of the distributable workspace.
+.agents/supervisor/AGENT.md
+configs/ted-learning.json
+configs/ted-supervisor.json
+
+# Local presentation drafts, research working papers, and rendered assets.
+docs/academic-contribution-and-experimental-closure-report.md
+docs/agent-hatching-options.md
+docs/research-academic-landscape-2026-08-24.md
+docs/research-purpose-process-results-report.md
+docs/weekly-report-2026-08-24.md
+docs/ted-demo-preview*.html
+docs/ted-demo-script.md
+docs/ted-demo-v8-before-v6-shell.html
+docs/ted-demo-v8.html
+docs/ted-live-validation-*.md
+docs/ted-university-script.md
+docs/ted-v5-*.md
+docs/ted-v7-*.md
+docs/ted-v8-12min-180cpm-script.md
+docs/ted-v8-*.docx
+docs/建个大学给AI上_TED演讲稿_20260821.docx
+docs/assets/
+scripts/build_ted_v8_script_docx.py
 
 # Local installers and downloaded binaries
 Docker Desktop Installer.exe
